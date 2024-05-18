@@ -1,5 +1,7 @@
 #include "layer.h"
 
+#define TILE_SIZE 32 
+
 /* Token + Positional Embedding
  * @param [in1]  in: [s]
  * @param [in2] wte: [NUM_VOCAB, H]
@@ -120,20 +122,99 @@ void linear(Tensor *in, Tensor *w, Tensor *b, Tensor *out) {
  * @param [in2]  in2: [K, N]
  * @param [out]  out: [M, N]
  */
-void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
-  size_t M = in1->shape[0];
-  size_t K = in1->shape[1];
-  size_t N = in2->shape[1];
+// void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
+//   size_t M = in1->shape[0];
+//   size_t K = in1->shape[1];
+//   size_t N = in2->shape[1];
 
-#pragma omp parallel for
-  for (size_t i = 0; i < M; i++) {
-    for (size_t j = 0; j < N; j++) {
-      out->buf[i * N + j] = 0;
-      for (size_t k = 0; k < K; k++) {
-        out->buf[i * N + j] += in1->buf[i * K + k] * in2->buf[k * N + j];
-      }
+// #pragma omp parallel for
+//   for (size_t i = 0; i < M; i++) {
+//     for (size_t j = 0; j < N; j++) {
+//       out->buf[i * N + j] = 0;
+//       for (size_t k = 0; k < K; k++) {
+//         out->buf[i * N + j] += in1->buf[i * K + k] * in2->buf[k * N + j];
+//       }
+//     }
+//   }
+// }
+
+__global__ void matmul_kernel_naive(float *in1, float *in2, float *out, size_t M, size_t K, size_t N) {
+  size_t row = blockIdx.y * blockDim.y + threadIdx.y; 
+  size_t col = blockIdx.x * blockDim.x + threadIdx.x; 
+  
+  if (row < M && col < N) {
+    float sum = 0;
+    for (size_t k = 0; k < K; k++) {
+      sum += in1[row * K + k] * in2[k * N + col];
     }
+    out[row * N + col] = sum; 
   }
+}
+
+__global__ void matmul_kernel(float *A, float *B, float *C, size_t M, size_t K, size_t N) {
+  __shared__ float A_shared[TILE_SIZE][TILE_SIZE];
+  __shared__ float B_shared[TILE_SIZE][TILE_SIZE];   
+
+  int global_row = blockIdx.y * blockDim.y + threadIdx.y;
+  int global_col = blockIdx.x * blockDim.x + threadIdx.x; 
+  int local_row = threadIdx.y;
+  int local_col = threadIdx.x; 
+
+  float sum = 0.0f;
+
+  for (int k = 0; k < (K + TILE_SIZE - 1) / TILE_SIZE; k++) {
+    int A_local_row = global_row * K + k * TILE_SIZE + local_col; 
+    int B_local_col = (k * TILE_SIZE + local_row) * N + global_col; 
+    
+    if (global_row < M && k * TILE_SIZE + local_col < K) {
+      A_shared[local_row][local_col] = A[A_local_row];
+    } else {
+      A_shared[local_row][local_col] = 0.0f; 
+    }
+
+    if (global_col < N && k * TILE_SIZE + local_row < K) {
+      B_shared[local_row][local_col] = B[B_local_col];
+    } else {
+      B_shared[local_row][local_col] = 0.0f; 
+    }
+
+    __syncthreads();
+
+    for (int n = 0; n < TILE_SIZE; n++) {
+      sum += A_shared[local_row][n] * B_shared[n][local_col];
+    }
+
+    __syncthreads(); 
+  }
+
+  if (global_row < M && global_col < N) {
+    C[global_row * N + global_col] = sum; 
+  }
+}
+
+void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
+  size_t M = in1->shape[0]; 
+  size_t K = in1->shape[1]; 
+  size_t N = in2->shape[1]; 
+
+  float *d_in1; 
+  float *d_in2; 
+  float *d_out; 
+
+  cudaMalloc(&d_in1, M * K * sizeof(float)); 
+  cudaMalloc(&d_in2, K * N * sizeof(float)); 
+  cudaMalloc(&d_out, M * N * sizeof(float)); 
+
+  cudaMemcpy(d_in1, in1->buf, M * K * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_in2, in2->buf, K * N * sizeof(float), cudaMemcpyHostToDevice); 
+
+  dim3 blockDim(TILE_SIZE, TILE_SIZE);
+  dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
+  
+  matmul_kernel<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N); 
+
+  cudaMemcpy(out->buf, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost); 
+  // TODO consider cudaFree 
 }
 
 /* Transpose
@@ -194,11 +275,11 @@ void copy(Tensor *in, Tensor *out) {
  * @param [in2]           x: [N]
  * 'N' is the number of elements in the tensor.
  */
-void add(Tensor *inout, Tensor *x) {
-  size_t N = inout->num_elem();
+// void add(Tensor *inout, Tensor *x) {
+//   size_t N = inout->num_elem();
 
-  for (size_t i = 0; i < N; i++) { inout->buf[i] += x->buf[i]; }
-}
+//   for (size_t i = 0; i < N; i++) { inout->buf[i] += x->buf[i]; }
+// }
 
 /* Add GPU kernel
  * @param [in1 & out] inout: [N]
@@ -215,7 +296,7 @@ __global__ void add_kernel(float *inout, float *x, size_t N) {
  * @param [in2]           x: [N]
  * 'N' is the number of elements in the tensor.
  */
-void add_cuda(Tensor *inout, Tensor *x) {
+void add(Tensor *inout, Tensor *x) {
   size_t N = inout->num_elem();
 
   float *d_inout;
