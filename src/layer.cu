@@ -100,21 +100,62 @@ void layer_norm(Tensor *inout, Tensor *gamma, Tensor *beta) {
  * @param [in3]   b: [N]
  * @param [out] out: [M, N]
  */
+// void linear(Tensor *in, Tensor *w, Tensor *b, Tensor *out) {
+//   size_t M = in->shape[0];
+//   size_t K = in->shape[1];
+//   size_t N = w->shape[1];
+
+// #pragma omp parallel for
+//   for (size_t i = 0; i < M; i++) {
+//     for (size_t j = 0; j < N; j++) {
+//       out->buf[i * N + j] = 0;
+//       for (size_t k = 0; k < K; k++) {
+//         out->buf[i * N + j] += in->buf[i * K + k] * w->buf[k * N + j];
+//       }
+//       out->buf[i * N + j] += b->buf[j];
+//     }
+//   }
+// }
+
+__global__ void linear_kernel(float *in, float *w, float *b, float *out, size_t M, size_t K, size_t N) {
+  size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+  size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (row < M && col < N) {
+    float sum = 0.0f;
+    for (size_t k = 0; k < K; k++) {
+      sum += in[row * K + k] * w[k * N + col];
+    }
+    out[row * N + col] = sum + b[col];
+  }
+}
+
 void linear(Tensor *in, Tensor *w, Tensor *b, Tensor *out) {
   size_t M = in->shape[0];
   size_t K = in->shape[1];
   size_t N = w->shape[1];
 
-#pragma omp parallel for
-  for (size_t i = 0; i < M; i++) {
-    for (size_t j = 0; j < N; j++) {
-      out->buf[i * N + j] = 0;
-      for (size_t k = 0; k < K; k++) {
-        out->buf[i * N + j] += in->buf[i * K + k] * w->buf[k * N + j];
-      }
-      out->buf[i * N + j] += b->buf[j];
-    }
-  }
+  float *d_in;
+  float *d_w;
+  float *d_b; 
+  float *d_out;
+
+  cudaMalloc(&d_in, M * K * sizeof(float));
+  cudaMalloc(&d_w, K * N * sizeof(float));
+  cudaMalloc(&d_b, N * sizeof(float));
+  cudaMalloc(&d_out, M * N * sizeof(float));
+
+  cudaMemcpy(d_in, in->buf, M * K * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_w, w->buf, K * N * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_b, b->buf, N * sizeof(float), cudaMemcpyHostToDevice);
+
+  dim3 threadsPerBlock(16, 16);
+  dim3 blocksPerGrid((N + threadsPerBlock.x - 1) / threadsPerBlock.x, (M + threadsPerBlock.y - 1) / threadsPerBlock.y);
+
+  linear_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_in, d_w, d_b, d_out, M, K, N);
+
+  cudaMemcpy(out->buf, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost);
+  // TODO consider cudaFree
 }
 
 /* Matmul
