@@ -595,15 +595,48 @@ void extract_qkv(Tensor *in, size_t head_idx, size_t n_head, Tensor *q,
  * 'H_' is the hidden dimension/n_head.
  * 'n_head' is the number of heads.
  */
+// void merge_head(Tensor *in, size_t head_idx, size_t n_head, Tensor *out) {
+//   size_t s = in->shape[0];
+//   size_t H_ = in->shape[1];  // = HIDDEN_DIM/NUM_HEAD
+
+//   for (size_t i = 0; i < s; i++) {
+//     for (size_t j = 0; j < H_; j++) {
+//       out->buf[head_idx * s * H_ + i * H_ + j] = in->buf[i * H_ + j];
+//     }
+//   }
+// }
+
+__global__ void merge_head_kernel(float *in, size_t head_idx, size_t s, size_t H_, float *out) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx < s * H_) {
+    size_t i = idx / H_;
+    size_t j = idx % H_;
+    out[head_idx * s * H_ + i * H_ + j] = in[idx];
+  }
+}
+
 void merge_head(Tensor *in, size_t head_idx, size_t n_head, Tensor *out) {
   size_t s = in->shape[0];
-  size_t H_ = in->shape[1];  // = HIDDEN_DIM/NUM_HEAD
+  size_t H_ = in->shape[1];
 
-  for (size_t i = 0; i < s; i++) {
-    for (size_t j = 0; j < H_; j++) {
-      out->buf[head_idx * s * H_ + i * H_ + j] = in->buf[i * H_ + j];
-    }
-  }
+  float *d_in;
+  float *d_out;
+
+  cudaMalloc(&d_in, s * H_ * sizeof(float));
+  cudaMalloc(&d_out, n_head * s * H_ * sizeof(float));  
+
+  cudaMemcpy(d_in, in->buf, s * H_ * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_out, out->buf, n_head * s * H_ * sizeof(float), cudaMemcpyHostToDevice);  
+
+  dim3 blockDim(256);
+  dim3 gridDim((s * H_ + blockDim.x - 1) / blockDim.x);
+  merge_head_kernel<<<gridDim, blockDim>>>(d_in, head_idx, s, H_, d_out);
+
+  cudaMemcpy(out->buf, d_out, n_head * s * H_ * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_in);
+  cudaFree(d_out);
 }
 
 /* Concatenate each heads
@@ -613,19 +646,53 @@ void merge_head(Tensor *in, size_t head_idx, size_t n_head, Tensor *out) {
  * 's' is the number of tokens in the prompt.
  * 'H_' is the hidden dimension/n_head.
  */
+// void concat_head(Tensor *in, Tensor *out) {
+//   size_t n_head = in->shape[0];
+//   size_t s = in->shape[1];
+//   size_t H_ = in->shape[2];  // = HIDDEN_DIM/NUM_HEAD
+
+//   for (size_t i = 0; i < s; i++) {
+//     for (size_t j = 0; j < n_head; j++) {
+//       for (size_t k = 0; k < H_; k++) {
+//         out->buf[i * n_head * H_ + j * H_ + k] =
+//             in->buf[j * s * H_ + i * H_ + k];
+//       }
+//     }
+//   }
+// }
+
+__global__ void concat_head_kernel(float *in, float *out, size_t n_head, size_t s, size_t H_) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
+
+  if (idx < s * H_ * n_head) {
+    size_t i = (idx % (s * H_)) / H_; 
+    size_t j = idx / (s * H_); 
+    size_t k = idx % H_; 
+    out[i * n_head * H_ + j * H_ + k] = in[j * s * H_ + i * H_ + k];
+  }
+}
+
 void concat_head(Tensor *in, Tensor *out) {
   size_t n_head = in->shape[0];
-  size_t s = in->shape[1];
-  size_t H_ = in->shape[2];  // = HIDDEN_DIM/NUM_HEAD
+  size_t s = in->shape[1]; 
+  size_t H_ = in->shape[2]; 
 
-  for (size_t i = 0; i < s; i++) {
-    for (size_t j = 0; j < n_head; j++) {
-      for (size_t k = 0; k < H_; k++) {
-        out->buf[i * n_head * H_ + j * H_ + k] =
-            in->buf[j * s * H_ + i * H_ + k];
-      }
-    }
-  }
+  float *d_in; 
+  float *d_out; 
+
+  cudaMalloc(&d_in, n_head * s * H_ * sizeof(float));
+  cudaMalloc(&d_out, s * H_ * n_head * sizeof(float));
+
+  cudaMemcpy(d_in, in->buf, n_head * s * H_ * sizeof(float), cudaMemcpyHostToDevice);
+
+  dim3 blockDim(256);
+  dim3 gridDim((n_head * s * H_ + blockDim.x - 1) / blockDim.x);
+  concat_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, n_head, s, H_);
+
+  cudaMemcpy(out->buf, d_out, s * n_head * H_ * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_in);
+  cudaFree(d_out);
 }
 
 /* Greedy Max Sampling
