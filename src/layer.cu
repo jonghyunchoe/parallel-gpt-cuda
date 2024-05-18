@@ -111,24 +111,63 @@ void gelu(Tensor *inout) {
  * 's' is the number of tokens in the prompt.
  * 'H' is the hidden dimension.
  */
+// void softmax(Tensor *inout) {
+//   size_t s = inout->shape[0];
+//   size_t H = inout->shape[1];
+
+//   for (size_t i = 0; i < s; i++) {
+//     float max_val = inout->buf[i * H];
+//     for (size_t j = 0; j < H; j++) {
+//       if (inout->buf[i * H + j] > max_val) { max_val = inout->buf[i * H + j]; }
+//     }
+
+//     float sum = 0;
+//     for (size_t j = 0; j < H; j++) {
+//       inout->buf[i * H + j] = exp(inout->buf[i * H + j] - max_val);
+//       sum += inout->buf[i * H + j];
+//     }
+
+//     for (size_t j = 0; j < H; j++) { inout->buf[i * H + j] /= sum; }
+//   }
+// }
+
+__global__ void softmax_kernel(float *inout, size_t s, size_t V) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  
+  if (idx < s) {
+    float max_val = -INFINITY;
+    for (size_t j = 0; j < V; j++) {
+      max_val = fmaxf(max_val, inout[idx * V + j]);
+    }
+
+    float sum_exp = 0.0f;
+    for (size_t j = 0; j < V; j++) {
+      sum_exp += expf(inout[idx * V + j] - max_val);
+    }
+
+    for (size_t j = 0; j < V; j++) {
+      inout[idx * V + j] = expf(inout[idx * V + j] - max_val) / sum_exp;
+    }
+  }
+}
+
 void softmax(Tensor *inout) {
   size_t s = inout->shape[0];
-  size_t H = inout->shape[1];
+  size_t V = inout->shape[1];
 
-  for (size_t i = 0; i < s; i++) {
-    float max_val = inout->buf[i * H];
-    for (size_t j = 0; j < H; j++) {
-      if (inout->buf[i * H + j] > max_val) { max_val = inout->buf[i * H + j]; }
-    }
+  float *d_inout;
 
-    float sum = 0;
-    for (size_t j = 0; j < H; j++) {
-      inout->buf[i * H + j] = exp(inout->buf[i * H + j] - max_val);
-      sum += inout->buf[i * H + j];
-    }
+  cudaMalloc(&d_inout, s * V * sizeof(float));
 
-    for (size_t j = 0; j < H; j++) { inout->buf[i * H + j] /= sum; }
-  }
+  cudaMemcpy(d_inout, inout->buf, s * V * sizeof(float), cudaMemcpyHostToDevice);
+
+  dim3 blockDim(256);
+  dim3 gridDim((s + blockDim.x - 1) / blockDim.x);
+  softmax_kernel<<<gridDim, blockDim>>>(d_inout, s, V);
+
+  cudaMemcpy(inout->buf, d_inout, s * V * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_inout);
 }
 
 /* Layer Normalization
@@ -138,30 +177,79 @@ void softmax(Tensor *inout) {
  * 's' is the number of tokens in the prompt.
  * 'H' is the hidden dimension.
  */
+// void layer_norm(Tensor *inout, Tensor *gamma, Tensor *beta) {
+//   size_t s = inout->shape[0];
+//   size_t H = inout->shape[1];
+
+//   float eps = 1e-5;
+//   for (size_t i = 0; i < s; i++) {
+//     float mean = 0;
+//     float var = 0;
+
+//     for (size_t j = 0; j < H; j++) {
+//       mean += inout->buf[i * H + j];
+//       var += inout->buf[i * H + j] * inout->buf[i * H + j];
+//     }
+
+//     mean /= H;
+//     var = var / H - mean * mean;
+
+//     for (size_t j = 0; j < H; j++) {
+//       inout->buf[i * H + j] = (inout->buf[i * H + j] - mean) *
+//                                   (1.0 / sqrt(var + eps)) * gamma->buf[j] +
+//                               beta->buf[j];
+//     }
+//   }
+// }
+
+__global__ void layer_norm_kernel(float *inout, float *gamma, float *beta, size_t s, size_t H, float eps) {
+  size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  
+  if (i < s) {
+    float mean = 0;
+    float var = 0;
+
+    for (size_t j = 0; j < H; j++) {
+      mean += inout[i * H + j];
+      var += inout[i * H + j] * inout[i * H + j];
+    }
+    mean /= H;
+    var = var / H - mean * mean;
+
+    for (size_t j = 0; j < H; j++) {
+      inout[i * H + j] = (inout[i * H + j] - mean) * (1.0 / sqrtf(var + eps)) * gamma[j] + beta[j];
+    }
+  }
+}
+
 void layer_norm(Tensor *inout, Tensor *gamma, Tensor *beta) {
   size_t s = inout->shape[0];
   size_t H = inout->shape[1];
 
   float eps = 1e-5;
-  for (size_t i = 0; i < s; i++) {
-    float mean = 0;
-    float var = 0;
+  float *d_inout;
+  float *d_gamma;
+  float *d_beta;
 
-    for (size_t j = 0; j < H; j++) {
-      mean += inout->buf[i * H + j];
-      var += inout->buf[i * H + j] * inout->buf[i * H + j];
-    }
+  cudaMalloc(&d_inout, s * H * sizeof(float));
+  cudaMalloc(&d_gamma, H * sizeof(float));
+  cudaMalloc(&d_beta, H * sizeof(float));
 
-    mean /= H;
-    var = var / H - mean * mean;
+  cudaMemcpy(d_inout, inout->buf, s * H * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_gamma, gamma->buf, H * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_beta, beta->buf, H * sizeof(float), cudaMemcpyHostToDevice);
 
-    for (size_t j = 0; j < H; j++) {
-      inout->buf[i * H + j] = (inout->buf[i * H + j] - mean) *
-                                  (1.0 / sqrt(var + eps)) * gamma->buf[j] +
-                              beta->buf[j];
-    }
-  }
+  dim3 blockDim(256);
+  dim3 gridDim((s + blockDim.x - 1) / blockDim.x);
+  layer_norm_kernel<<<gridDim, blockDim>>>(d_inout, d_gamma, d_beta, s, H, eps);
+
+  cudaMemcpy(inout->buf, d_inout, s * H * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_inout);
+  cudaFree(d_gamma);
+  cudaFree(d_beta);
 }
+
 
 /* Linear
  * @param [in1]  in: [M, K]
@@ -419,18 +507,49 @@ void scaling(Tensor *inout, float scale) {
  * @param [in & out] inout: [s, s]
  * 's' is the number of tokens in the prompt.
  */
+// void generate_mask(Tensor *inout) {
+//   size_t s = inout->shape[0];
+
+//   for (size_t i = 0; i < s; i++) {
+//     for (size_t j = 0; j < s; j++) {
+//       if (i >= j) {
+//         inout->buf[i * s + j] = 0;
+//       } else {
+//         inout->buf[i * s + j] = -1e10;
+//       }
+//     }
+//   }
+// }
+
+__global__ void generate_mask_kernel(float *inout, size_t s) {
+  size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+  size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (row < s && col < s) {
+    if (row >= col) {
+      inout[row * s + col] = 0;
+    } else {
+      inout[row * s + col] = -1e10;
+    }
+  }
+}
+
 void generate_mask(Tensor *inout) {
   size_t s = inout->shape[0];
 
-  for (size_t i = 0; i < s; i++) {
-    for (size_t j = 0; j < s; j++) {
-      if (i >= j) {
-        inout->buf[i * s + j] = 0;
-      } else {
-        inout->buf[i * s + j] = -1e10;
-      }
-    }
-  }
+  float *d_inout;
+
+  cudaMalloc(&d_inout, s * s * sizeof(float));
+
+  cudaMemcpy(d_inout, inout->buf, s * s * sizeof(float), cudaMemcpyHostToDevice);
+
+  dim3 blockDim(16, 16);
+  dim3 gridDim((s + blockDim.x - 1) / blockDim.x, (s + blockDim.y - 1) / blockDim.y);
+  generate_mask_kernel<<<gridDim, blockDim>>>(d_inout, s);
+
+  cudaMemcpy(inout->buf, d_inout, s * s * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_inout);
 }
 
 /* Copy
@@ -520,19 +639,55 @@ void add(Tensor *inout, Tensor *x) {
  * @param [in1]  in: [s, H]
  * @param [out] out: [3, s, H/3]
  */
+// void split_qkv(Tensor *in, Tensor *out) {
+//   size_t s = in->shape[0];
+//   size_t H = in->shape[1];
+
+//   for (size_t i = 0; i < 3; i++) {
+//     for (size_t j = 0; j < s; j++) {
+//       for (size_t k = 0; k < H / 3; k++) {
+//         out->buf[i * s * (H / 3) + j * (H / 3) + k] =
+//             in->buf[i * (H / 3) + j * 3 * (H / 3) + k];
+//       }
+//     }
+//   }
+// }
+
+__global__ void split_qkv_kernel(float *in, float *out, size_t s, size_t H, size_t N) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx < N) {
+    size_t i = idx / (s * (H / 3));
+    size_t j = (idx % (s * (H / 3))) / (H / 3);
+    size_t k = idx % (H / 3);
+
+    out[idx] = in[i * (H / 3) + j * H + k];
+  }
+}
+
 void split_qkv(Tensor *in, Tensor *out) {
   size_t s = in->shape[0];
   size_t H = in->shape[1];
+  size_t N = 3 * s * (H / 3);
 
-  for (size_t i = 0; i < 3; i++) {
-    for (size_t j = 0; j < s; j++) {
-      for (size_t k = 0; k < H / 3; k++) {
-        out->buf[i * s * (H / 3) + j * (H / 3) + k] =
-            in->buf[i * (H / 3) + j * 3 * (H / 3) + k];
-      }
-    }
-  }
+  float *d_in;
+  float *d_out;
+
+  cudaMalloc(&d_in, s * H * sizeof(float));
+  cudaMalloc(&d_out, s * H * sizeof(float));
+
+  cudaMemcpy(d_in, in->buf, s * H * sizeof(float), cudaMemcpyHostToDevice);
+
+  dim3 blockDim(256);
+  dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
+  split_qkv_kernel<<<gridDim, blockDim>>>(d_in, d_out, s, H, N);
+
+  cudaMemcpy(out->buf, d_out, s * H * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_in);
+  cudaFree(d_out);
 }
+
 
 /* Split into heads
  * @param [in1]  in: [3, s, H]
@@ -541,21 +696,57 @@ void split_qkv(Tensor *in, Tensor *out) {
  * 'H' is the hidden dimension.
  * 'n_head' is the number of heads.
  */
+// void split_head(Tensor *in, size_t n_head, Tensor *out) {
+//   size_t s = in->shape[1];
+//   size_t H = in->shape[2];
+
+//   for (size_t i = 0; i < 3; i++) {
+//     for (size_t j = 0; j < n_head; j++) {
+//       for (size_t k = 0; k < s; k++) {
+//         for (size_t l = 0; l < H / n_head; l++) {
+//           out->buf[i * n_head * s * H / n_head + j * s * H / n_head +
+//                    k * H / n_head + l] =
+//               in->buf[i * s * H + k * H + j * H / n_head + l];
+//         }
+//       }
+//     }
+//   }
+// }
+
+__global__ void split_head_kernel(float *in, float *out, size_t n_head, size_t s, size_t H, size_t N) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx < N) {
+    size_t i = idx / (n_head * s * (H / n_head));
+    size_t j = (idx % (n_head * s * (H / n_head))) / (s * (H / n_head));
+    size_t k = (idx % (s * (H / n_head))) / (H / n_head);
+    size_t l = idx % (H / n_head);
+
+    out[idx] = in[i * s * H + k * H + j * (H / n_head) + l];
+  }
+}
+
 void split_head(Tensor *in, size_t n_head, Tensor *out) {
   size_t s = in->shape[1];
   size_t H = in->shape[2];
+  size_t N = 3 * n_head * s * (H / n_head);
 
-  for (size_t i = 0; i < 3; i++) {
-    for (size_t j = 0; j < n_head; j++) {
-      for (size_t k = 0; k < s; k++) {
-        for (size_t l = 0; l < H / n_head; l++) {
-          out->buf[i * n_head * s * H / n_head + j * s * H / n_head +
-                   k * H / n_head + l] =
-              in->buf[i * s * H + k * H + j * H / n_head + l];
-        }
-      }
-    }
-  }
+  float *d_in;
+  float *d_out;
+
+  cudaMalloc(&d_in, 3 * s * H * sizeof(float));
+  cudaMalloc(&d_out, 3 * n_head * s * (H / n_head) * sizeof(float));
+
+  cudaMemcpy(d_in, in->buf, 3 * s * H * sizeof(float), cudaMemcpyHostToDevice);
+
+  dim3 blockDim(256);
+  dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
+  split_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, n_head, s, H, N);
+
+  cudaMemcpy(out->buf, d_out, 3 * n_head * s * (H / n_head) * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_in);
+  cudaFree(d_out);
 }
 
 /* Extract Q, K, V from QKV head
@@ -569,21 +760,65 @@ void split_head(Tensor *in, size_t n_head, Tensor *out) {
  * 'H_' is the hidden dimension/n_head.
  * 'n_head' is the number of heads.
  */
-void extract_qkv(Tensor *in, size_t head_idx, size_t n_head, Tensor *q,
-                 Tensor *k, Tensor *v) {
-  size_t s = in->shape[2];
-  size_t H_ = in->shape[3];  // = HIDDEN_DIM/NUM_HEAD
+// void extract_qkv(Tensor *in, size_t head_idx, size_t n_head, Tensor *q,
+//                  Tensor *k, Tensor *v) {
+//   size_t s = in->shape[2];
+//   size_t H_ = in->shape[3];  // = HIDDEN_DIM/NUM_HEAD
 
-  for (size_t i = 0; i < s; i++) {
-    for (size_t j = 0; j < H_; j++) {
-      q->buf[i * H_ + j] =
-          in->buf[0 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
-      k->buf[i * H_ + j] =
-          in->buf[1 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
-      v->buf[i * H_ + j] =
-          in->buf[2 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
-    }
+//   for (size_t i = 0; i < s; i++) {
+//     for (size_t j = 0; j < H_; j++) {
+//       q->buf[i * H_ + j] =
+//           in->buf[0 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
+//       k->buf[i * H_ + j] =
+//           in->buf[1 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
+//       v->buf[i * H_ + j] =
+//           in->buf[2 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
+//     }
+//   }
+// }
+
+__global__ void extract_qkv_kernel(float *in, size_t head_idx, size_t n_head, float *q, float *k, float *v, size_t s, size_t H_, size_t N) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx < N) {
+    size_t i = idx / H_;
+    size_t j = idx % H_;
+
+    q[i * H_ + j] = in[0 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
+    k[i * H_ + j] = in[1 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
+    v[i * H_ + j] = in[2 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
   }
+}
+
+void extract_qkv(Tensor *in, size_t head_idx, size_t n_head, Tensor *q, Tensor *k, Tensor *v) {
+  size_t s = in->shape[2];
+  size_t H_ = in->shape[3];
+  size_t N = s * H_;
+
+  float *d_in;
+  float *d_q;
+  float *d_k;
+  float *d_v;
+
+  cudaMalloc(&d_in, 3 * n_head * s * H_ * sizeof(float));
+  cudaMalloc(&d_q, s * H_ * sizeof(float));
+  cudaMalloc(&d_k, s * H_ * sizeof(float));
+  cudaMalloc(&d_v, s * H_ * sizeof(float));
+
+  cudaMemcpy(d_in, in->buf, 3 * n_head * s * H_ * sizeof(float), cudaMemcpyHostToDevice);
+
+  dim3 blockDim(256);
+  dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
+  extract_qkv_kernel<<<gridDim, blockDim>>>(d_in, head_idx, n_head, d_q, d_k, d_v, s, H_, N);
+
+  cudaMemcpy(q->buf, d_q, s * H_ * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(k->buf, d_k, s * H_ * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(v->buf, d_v, s * H_ * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_in);
+  cudaFree(d_q);
+  cudaFree(d_k);
+  cudaFree(d_v);
 }
 
 /* Merge each heads
