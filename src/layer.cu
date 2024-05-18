@@ -2,6 +2,9 @@
 
 #define TILE_SIZE 32 
 
+// TODO move and coalesce cudaMalloc, cudaMemcpy, and cudaFree to start and end 
+// TODO function only has blockDim, gridDim and kernel call 
+
 /* Token + Positional Embedding
  * @param [in1]  in: [s]
  * @param [in2] wte: [NUM_VOCAB, H]
@@ -32,34 +35,10 @@ __global__ void token_pos_embedding_kernel(int *in, float *wte, float *wpe, floa
   }
 }
 
-void token_pos_embedding(vector<int> in, Tensor *wte, Tensor *wpe, Tensor *out) {
-  size_t s = in.size(); 
-  size_t H = wte->shape[1]; 
-
-  int *d_in; 
-  float *d_wte; 
-  float *d_wpe; 
-  float *d_out; 
-
-  cudaMalloc(&d_in, s * sizeof(int));
-  cudaMalloc(&d_wte, wte->num_elem() * sizeof(float));
-  cudaMalloc(&d_wpe, wpe->num_elem() * sizeof(float)); 
-  cudaMalloc(&d_out, s * H * sizeof(float));
-
-  cudaMemcpy(d_in, in.data(), s * sizeof(int), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_wte, wte->buf, wte->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_wpe, wpe->buf, wpe->num_elem() * sizeof(float), cudaMemcpyHostToDevice); 
-
+void token_pos_embedding(int *d_in, float *d_wte, float *d_wpe, float *d_out, size_t s, size_t H) {
   dim3 blockDim(256); 
   dim3 gridDim((s * H + blockDim.x - 1) / blockDim.x); 
   token_pos_embedding_kernel<<<gridDim, blockDim>>>(d_in, d_wte, d_wpe, d_out, s, H);
-
-  cudaMemcpy(out->buf, d_out, s * H * sizeof(float), cudaMemcpyDeviceToHost); 
-
-  cudaFree(d_in);
-  cudaFree(d_wte);
-  cudaFree(d_wpe);
-  cudaFree(d_out);
 }
 
 /* GELU
@@ -88,22 +67,10 @@ __global__ void gelu_kernel(float *inout, size_t N) {
   }
 }
 
-void gelu(Tensor *inout) {
-  size_t N = inout->num_elem(); 
-
-  float *d_inout;
-
-  cudaMalloc(&d_inout, N * sizeof(float));
-
-  cudaMemcpy(d_inout, inout->buf, N * sizeof(float), cudaMemcpyHostToDevice);
-
+void gelu(float *d_inout, size_t N) {
   dim3 blockDim(256); 
   dim3 gridDim((N + blockDim.x - 1) / blockDim.x); 
   gelu_kernel<<<gridDim, blockDim>>>(d_inout, N);
-
-  cudaMemcpy(inout->buf, d_inout, N * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_inout);
 }
 
 /* Softmax (w/ Max Trick)
@@ -151,23 +118,10 @@ __global__ void softmax_kernel(float *inout, size_t s, size_t V) {
   }
 }
 
-void softmax(Tensor *inout) {
-  size_t s = inout->shape[0];
-  size_t V = inout->shape[1];
-
-  float *d_inout;
-
-  cudaMalloc(&d_inout, s * V * sizeof(float));
-
-  cudaMemcpy(d_inout, inout->buf, s * V * sizeof(float), cudaMemcpyHostToDevice);
-
+void softmax(float *d_inout, size_t s, size_t V) {
   dim3 blockDim(256);
   dim3 gridDim((s + blockDim.x - 1) / blockDim.x);
   softmax_kernel<<<gridDim, blockDim>>>(d_inout, s, V);
-
-  cudaMemcpy(inout->buf, d_inout, s * V * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_inout);
 }
 
 /* Layer Normalization
@@ -222,34 +176,12 @@ __global__ void layer_norm_kernel(float *inout, float *gamma, float *beta, size_
   }
 }
 
-void layer_norm(Tensor *inout, Tensor *gamma, Tensor *beta) {
-  size_t s = inout->shape[0];
-  size_t H = inout->shape[1];
-
+void layer_norm(float *d_inout, float *d_gamma, float *d_beta, size_t s, size_t H) {
   float eps = 1e-5;
-  float *d_inout;
-  float *d_gamma;
-  float *d_beta;
-
-  cudaMalloc(&d_inout, s * H * sizeof(float));
-  cudaMalloc(&d_gamma, H * sizeof(float));
-  cudaMalloc(&d_beta, H * sizeof(float));
-
-  cudaMemcpy(d_inout, inout->buf, s * H * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_gamma, gamma->buf, H * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_beta, beta->buf, H * sizeof(float), cudaMemcpyHostToDevice);
-
   dim3 blockDim(256);
   dim3 gridDim((s + blockDim.x - 1) / blockDim.x);
   layer_norm_kernel<<<gridDim, blockDim>>>(d_inout, d_gamma, d_beta, s, H, eps);
-
-  cudaMemcpy(inout->buf, d_inout, s * H * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_inout);
-  cudaFree(d_gamma);
-  cudaFree(d_beta);
 }
-
 
 /* Linear
  * @param [in1]  in: [M, K]
@@ -287,36 +219,10 @@ __global__ void linear_kernel(float *in, float *w, float *b, float *out, size_t 
   }
 }
 
-void linear(Tensor *in, Tensor *w, Tensor *b, Tensor *out) {
-  size_t M = in->shape[0];
-  size_t K = in->shape[1];
-  size_t N = w->shape[1];
-
-  float *d_in;
-  float *d_w;
-  float *d_b;
-  float *d_out;
-
-  cudaMalloc(&d_in, M * K * sizeof(float));
-  cudaMalloc(&d_w, K * N * sizeof(float));
-  cudaMalloc(&d_b, N * sizeof(float));
-  cudaMalloc(&d_out, M * N * sizeof(float));
-
-  cudaMemcpy(d_in, in->buf, M * K * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_w, w->buf, K * N * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_b, b->buf, N * sizeof(float), cudaMemcpyHostToDevice);
-
+void linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t M, size_t K, size_t N) {
   dim3 blockDim(16, 16);
   dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y);
-
   linear_kernel<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, M, K, N);
-
-  cudaMemcpy(out->buf, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_w);
-  cudaFree(d_b);
-  cudaFree(d_out);
 }
 
 /* Matmul
@@ -394,32 +300,10 @@ __global__ void matmul_kernel(float *A, float *B, float *C, size_t M, size_t K, 
   }
 }
 
-void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
-  size_t M = in1->shape[0]; 
-  size_t K = in1->shape[1]; 
-  size_t N = in2->shape[1]; 
-
-  float *d_in1; 
-  float *d_in2; 
-  float *d_out; 
-
-  cudaMalloc(&d_in1, M * K * sizeof(float)); 
-  cudaMalloc(&d_in2, K * N * sizeof(float)); 
-  cudaMalloc(&d_out, M * N * sizeof(float)); 
-
-  cudaMemcpy(d_in1, in1->buf, M * K * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_in2, in2->buf, K * N * sizeof(float), cudaMemcpyHostToDevice); 
-
+void matmul(float *d_in1, float *d_in2, float *d_out, size_t M, size_t K, size_t N) {
   dim3 blockDim(TILE_SIZE, TILE_SIZE);
   dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
-  
-  matmul_kernel<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N); 
-
-  cudaMemcpy(out->buf, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost); 
-
-  cudaFree(d_in1);
-  cudaFree(d_in2);
-  cudaFree(d_out);
+  matmul_kernel<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N);
 }
 
 /* Transpose
@@ -444,26 +328,10 @@ __global__ void transpose_kernel(float *in, float *out, size_t M, size_t N) {
   }
 }
 
-void transpose(Tensor *in, Tensor *out) {
-  size_t M = in->shape[0];
-  size_t N = in->shape[1]; 
-
-  float *d_in;
-  float *d_out;
-
-  cudaMalloc(&d_in, M * N * sizeof(float));
-  cudaMalloc(&d_out, N * M * sizeof(float));
-
-  cudaMemcpy(d_in, in->buf, M * N * sizeof(float), cudaMemcpyHostToDevice);
-
+void transpose(float *d_in, float *d_out, size_t M, size_t N) {
   dim3 blockDim(16, 16);
   dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim. y - 1) / blockDim.y);
-  transpose_kernel<<<gridDim, blockDim>>>(d_in, d_out, M, N); 
-
-  cudaMemcpy(out->buf, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_out);
+  transpose_kernel<<<gridDim, blockDim>>>(d_in, d_out, M, N);
 }
 
 /* Scaling
@@ -485,22 +353,10 @@ __global__ void scaling_kernel(float *inout, float scale, size_t N) {
   }
 }
 
-void scaling(Tensor *inout, float scale) {
-  size_t N = inout->num_elem();
-
-  float *d_inout; 
-
-  cudaMalloc(&d_inout, N * sizeof(float));
-
-  cudaMemcpy(d_inout, inout->buf, N * sizeof(float), cudaMemcpyHostToDevice);
-
+void scaling(float *d_inout, float scale, size_t N) {
   dim3 blockDim(256);
   dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
-  scaling_kernel<<<gridDim, blockDim>>>(d_inout, scale, N); 
-
-  cudaMemcpy(inout->buf, d_inout, N * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_inout); 
+  scaling_kernel<<<gridDim, blockDim>>>(d_inout, scale, N);
 }
 
 /* Generate mask
@@ -534,22 +390,10 @@ __global__ void generate_mask_kernel(float *inout, size_t s) {
   }
 }
 
-void generate_mask(Tensor *inout) {
-  size_t s = inout->shape[0];
-
-  float *d_inout;
-
-  cudaMalloc(&d_inout, s * s * sizeof(float));
-
-  cudaMemcpy(d_inout, inout->buf, s * s * sizeof(float), cudaMemcpyHostToDevice);
-
+void generate_mask(float *d_inout, size_t s) {
   dim3 blockDim(16, 16);
   dim3 gridDim((s + blockDim.x - 1) / blockDim.x, (s + blockDim.y - 1) / blockDim.y);
   generate_mask_kernel<<<gridDim, blockDim>>>(d_inout, s);
-
-  cudaMemcpy(inout->buf, d_inout, s * s * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_inout);
 }
 
 /* Copy
@@ -571,25 +415,10 @@ __global__ void copy_kernel(float *in, float *out, size_t N) {
   }
 }
 
-void copy(Tensor *in, Tensor *out) {
-  size_t N = in->num_elem(); 
-
-  float *d_in;
-  float *d_out; 
-
-  cudaMalloc(&d_in, N * sizeof(float));
-  cudaMalloc(&d_out, N * sizeof(float)); 
-
-  cudaMemcpy(d_in, in->buf, N * sizeof(float), cudaMemcpyHostToDevice);
-
+void copy(float *d_in, float *d_out, size_t N) {
   dim3 blockDim(256);
   dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
   copy_kernel<<<gridDim, blockDim>>>(d_in, d_out, N);
-
-  cudaMemcpy(out->buf, d_out, N * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_out); 
 }
 
 /* Add
@@ -618,21 +447,10 @@ __global__ void add_kernel(float *inout, float *x, size_t N) {
  * @param [in2]           x: [N]
  * 'N' is the number of elements in the tensor.
  */
-void add(Tensor *inout, Tensor *x) {
-  size_t N = inout->num_elem();
-
-  float *d_inout;
-  float *d_x;
-
-  cudaMalloc(&d_inout, N * sizeof(float));
-  cudaMalloc(&d_x, N * sizeof(float));
-
-  cudaMemcpy(d_inout, inout->buf, N * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_x, x->buf, N * sizeof(float), cudaMemcpyHostToDevice);
-
-  add_kernel<<<(N + 255) / 256, 256>>>(d_inout, d_x, N);
-
-  cudaMemcpy(inout->buf, d_inout, N * sizeof(float), cudaMemcpyDeviceToHost);
+void add(float *d_inout, float *d_x, size_t N) {
+  dim3 blockDim(256);
+  dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
+  add_kernel<<<gridDim, blockDim>>>(d_inout, d_x, N);
 }
 
 /* Split into QKV
@@ -665,29 +483,12 @@ __global__ void split_qkv_kernel(float *in, float *out, size_t s, size_t H, size
   }
 }
 
-void split_qkv(Tensor *in, Tensor *out) {
-  size_t s = in->shape[0];
-  size_t H = in->shape[1];
+void split_qkv(float *d_in, float *d_out, size_t s, size_t H) {
   size_t N = 3 * s * (H / 3);
-
-  float *d_in;
-  float *d_out;
-
-  cudaMalloc(&d_in, s * H * sizeof(float));
-  cudaMalloc(&d_out, s * H * sizeof(float));
-
-  cudaMemcpy(d_in, in->buf, s * H * sizeof(float), cudaMemcpyHostToDevice);
-
   dim3 blockDim(256);
   dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
   split_qkv_kernel<<<gridDim, blockDim>>>(d_in, d_out, s, H, N);
-
-  cudaMemcpy(out->buf, d_out, s * H * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_out);
 }
-
 
 /* Split into heads
  * @param [in1]  in: [3, s, H]
@@ -726,27 +527,11 @@ __global__ void split_head_kernel(float *in, float *out, size_t n_head, size_t s
   }
 }
 
-void split_head(Tensor *in, size_t n_head, Tensor *out) {
-  size_t s = in->shape[1];
-  size_t H = in->shape[2];
+void split_head(float *d_in, float *d_out, size_t n_head, size_t s, size_t H) {
   size_t N = 3 * n_head * s * (H / n_head);
-
-  float *d_in;
-  float *d_out;
-
-  cudaMalloc(&d_in, 3 * s * H * sizeof(float));
-  cudaMalloc(&d_out, 3 * n_head * s * (H / n_head) * sizeof(float));
-
-  cudaMemcpy(d_in, in->buf, 3 * s * H * sizeof(float), cudaMemcpyHostToDevice);
-
   dim3 blockDim(256);
   dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
   split_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, n_head, s, H, N);
-
-  cudaMemcpy(out->buf, d_out, 3 * n_head * s * (H / n_head) * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_out);
 }
 
 /* Extract Q, K, V from QKV head
@@ -790,35 +575,11 @@ __global__ void extract_qkv_kernel(float *in, size_t head_idx, size_t n_head, fl
   }
 }
 
-void extract_qkv(Tensor *in, size_t head_idx, size_t n_head, Tensor *q, Tensor *k, Tensor *v) {
-  size_t s = in->shape[2];
-  size_t H_ = in->shape[3];
+void extract_qkv(float *d_in, size_t head_idx, size_t n_head, float *d_q, float *d_k, float *d_v, size_t s, size_t H_) {
   size_t N = s * H_;
-
-  float *d_in;
-  float *d_q;
-  float *d_k;
-  float *d_v;
-
-  cudaMalloc(&d_in, 3 * n_head * s * H_ * sizeof(float));
-  cudaMalloc(&d_q, s * H_ * sizeof(float));
-  cudaMalloc(&d_k, s * H_ * sizeof(float));
-  cudaMalloc(&d_v, s * H_ * sizeof(float));
-
-  cudaMemcpy(d_in, in->buf, 3 * n_head * s * H_ * sizeof(float), cudaMemcpyHostToDevice);
-
   dim3 blockDim(256);
   dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
   extract_qkv_kernel<<<gridDim, blockDim>>>(d_in, head_idx, n_head, d_q, d_k, d_v, s, H_, N);
-
-  cudaMemcpy(q->buf, d_q, s * H_ * sizeof(float), cudaMemcpyDeviceToHost);
-  cudaMemcpy(k->buf, d_k, s * H_ * sizeof(float), cudaMemcpyDeviceToHost);
-  cudaMemcpy(v->buf, d_v, s * H_ * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_q);
-  cudaFree(d_k);
-  cudaFree(d_v);
 }
 
 /* Merge each heads
@@ -851,27 +612,10 @@ __global__ void merge_head_kernel(float *in, size_t head_idx, size_t s, size_t H
   }
 }
 
-void merge_head(Tensor *in, size_t head_idx, size_t n_head, Tensor *out) {
-  size_t s = in->shape[0];
-  size_t H_ = in->shape[1];
-
-  float *d_in;
-  float *d_out;
-
-  cudaMalloc(&d_in, s * H_ * sizeof(float));
-  cudaMalloc(&d_out, n_head * s * H_ * sizeof(float));  
-
-  cudaMemcpy(d_in, in->buf, s * H_ * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_out, out->buf, n_head * s * H_ * sizeof(float), cudaMemcpyHostToDevice);  
-
+void merge_head(float *d_in, size_t head_idx, size_t n_head, float *d_out, size_t s, size_t H_) {
   dim3 blockDim(256);
   dim3 gridDim((s * H_ + blockDim.x - 1) / blockDim.x);
   merge_head_kernel<<<gridDim, blockDim>>>(d_in, head_idx, s, H_, d_out);
-
-  cudaMemcpy(out->buf, d_out, n_head * s * H_ * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_out);
 }
 
 /* Concatenate each heads
@@ -907,27 +651,10 @@ __global__ void concat_head_kernel(float *in, float *out, size_t n_head, size_t 
   }
 }
 
-void concat_head(Tensor *in, Tensor *out) {
-  size_t n_head = in->shape[0];
-  size_t s = in->shape[1]; 
-  size_t H_ = in->shape[2]; 
-
-  float *d_in; 
-  float *d_out; 
-
-  cudaMalloc(&d_in, n_head * s * H_ * sizeof(float));
-  cudaMalloc(&d_out, s * H_ * n_head * sizeof(float));
-
-  cudaMemcpy(d_in, in->buf, n_head * s * H_ * sizeof(float), cudaMemcpyHostToDevice);
-
+void concat_head(float *d_in, float *d_out, size_t n_head, size_t s, size_t H_) {
   dim3 blockDim(256);
   dim3 gridDim((n_head * s * H_ + blockDim.x - 1) / blockDim.x);
   concat_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, n_head, s, H_);
-
-  cudaMemcpy(out->buf, d_out, s * n_head * H_ * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_out);
 }
 
 /* Greedy Max Sampling
@@ -936,18 +663,58 @@ void concat_head(Tensor *in, Tensor *out) {
  * 's' is the number of tokens in the prompt.
  * 'V' is the number of vocabulary.
  */
-int top1_sampling(Tensor *in) {
-  size_t s = in->shape[0];
-  size_t V = in->shape[1];
+// int top1_sampling(Tensor *in) {
+//   size_t s = in->shape[0];
+//   size_t V = in->shape[1];
 
-  int out = 0;
-  float max = -INFINITY;
-  for (size_t i = 0; i < V; i++) {
-    if (in->buf[(s - 1) * V + i] > max) {
-      max = in->buf[(s - 1) * V + i];
-      out = i;
+//   int out = 0;
+//   float max = -INFINITY;
+//   for (size_t i = 0; i < V; i++) {
+//     if (in->buf[(s - 1) * V + i] > max) {
+//       max = in->buf[(s - 1) * V + i];
+//       out = i;
+//     }
+//   }
+
+//   return out;
+// }
+
+__global__ void top1_sampling_kernel(float *in, int *out, size_t V) {
+    size_t idx = threadIdx.x;
+
+    __shared__ float max_val;
+    __shared__ int max_idx;
+
+    if (idx == 0) {
+        max_val = -INFINITY;
+        max_idx = 0;
     }
-  }
+    __syncthreads();
 
-  return out;
+    float val = in[idx];
+    atomicMax((int*)&max_val, __float_as_int(val));
+    __syncthreads();
+
+    if (val == max_val) {
+        atomicExch(&max_idx, idx);
+    }
+    __syncthreads();
+
+    if (idx == 0) {
+        *out = max_idx;
+    }
+}
+
+int top1_sampling(float *d_in, size_t V) {
+  int h_out;
+  int *d_out;
+  cudaMalloc(&d_out, sizeof(int));
+
+  dim3 blockDim(V);
+  top1_sampling_kernel<<<1, blockDim>>>(d_in, d_out, V);
+
+  cudaMemcpy(&h_out, d_out, sizeof(int), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_out);
+  return h_out;
 }
