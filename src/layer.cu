@@ -66,15 +66,44 @@ void token_pos_embedding(vector<int> in, Tensor *wte, Tensor *wpe, Tensor *out) 
  * @param [in & out] inout: [N]
  * 'N' is the number of elements in the tensor.
  */
-void gelu(Tensor *inout) {
-  size_t N = inout->num_elem();
+// void gelu(Tensor *inout) {
+//   size_t N = inout->num_elem();
 
-  for (size_t i = 0; i < N; i++) {
-    float x = inout->buf[i];
-    inout->buf[i] =
+//   for (size_t i = 0; i < N; i++) {
+//     float x = inout->buf[i];
+//     inout->buf[i] =
+//         0.5 * x *
+//         (1.f + tanh(sqrt(2.f / MATH_PI) * (x + 0.044715f * x * x * x)));
+//   }
+// }
+
+__global__ void gelu_kernel(float *inout, size_t N) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
+  
+  if (idx < N) {
+    float x = inout[idx]; 
+    inout[idx] = 
         0.5 * x *
         (1.f + tanh(sqrt(2.f / MATH_PI) * (x + 0.044715f * x * x * x)));
   }
+}
+
+void gelu(Tensor *inout) {
+  size_t N = inout->num_elem(); 
+
+  float *d_inout;
+
+  cudaMalloc(&d_inout, N * sizeof(float));
+
+  cudaMemcpy(d_inout, inout->buf, N * sizeof(float), cudaMemcpyHostToDevice);
+
+  dim3 blockDim(256); 
+  dim3 gridDim((N + blockDim.x - 1) / blockDim.x); 
+  gelu_kernel<<<gridDim, blockDim>>>(d_inout, N);
+
+  cudaMemcpy(inout->buf, d_inout, N * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_inout);
 }
 
 /* Softmax (w/ Max Trick)
@@ -309,13 +338,44 @@ void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
  * @param [in1]  in: [M, N]
  * @param [out] out: [N, M]
  */
+// void transpose(Tensor *in, Tensor *out) {
+//   size_t M = in->shape[0];
+//   size_t N = in->shape[1];
+
+//   for (size_t i = 0; i < M; i++) {
+//     for (size_t j = 0; j < N; j++) { out->buf[j * M + i] = in->buf[i * N + j]; }
+//   }
+// }
+
+__global__ void transpose_kernel(float *in, float *out, size_t M, size_t N) {
+  size_t row = blockIdx.y * blockDim.y + threadIdx.y; 
+  size_t col = blockIdx.x * blockDim.x + threadIdx.x; 
+  
+  if (row < M && col < N) {
+    out[col * M + row] = in[row * N + col];
+  }
+}
+
 void transpose(Tensor *in, Tensor *out) {
   size_t M = in->shape[0];
-  size_t N = in->shape[1];
+  size_t N = in->shape[1]; 
 
-  for (size_t i = 0; i < M; i++) {
-    for (size_t j = 0; j < N; j++) { out->buf[j * M + i] = in->buf[i * N + j]; }
-  }
+  float *d_in;
+  float *d_out;
+
+  cudaMalloc(&d_in, M * N * sizeof(float));
+  cudaMalloc(&d_out, N * M * sizeof(float));
+
+  cudaMemcpy(d_in, in->buf, M * N * sizeof(float), cudaMemcpyHostToDevice);
+
+  dim3 blockDim(16, 16);
+  dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim. y - 1) / blockDim.y);
+  transpose_kernel<<<gridDim, blockDim>>>(d_in, d_out, M, N); 
+
+  cudaMemcpy(out->buf, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_in);
+  cudaFree(d_out);
 }
 
 /* Scaling
@@ -323,10 +383,36 @@ void transpose(Tensor *in, Tensor *out) {
  * @param [in2]       scale: [1]
  * 'N' is the number of elements in the tensor.
  */
+// void scaling(Tensor *inout, float scale) {
+//   size_t N = inout->num_elem();
+
+//   for (size_t i = 0; i < N; i++) { inout->buf[i] *= scale; }
+// }
+
+__global__ void scaling_kernel(float *inout, float scale, size_t N) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
+
+  if (idx < N) {
+    inout[idx] *= scale; 
+  }
+}
+
 void scaling(Tensor *inout, float scale) {
   size_t N = inout->num_elem();
 
-  for (size_t i = 0; i < N; i++) { inout->buf[i] *= scale; }
+  float *d_inout; 
+
+  cudaMalloc(&d_inout, N * sizeof(float));
+
+  cudaMemcpy(d_inout, inout->buf, N * sizeof(float), cudaMemcpyHostToDevice);
+
+  dim3 blockDim(256);
+  dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
+  scaling_kernel<<<gridDim, blockDim>>>(d_inout, scale, N); 
+
+  cudaMemcpy(inout->buf, d_inout, N * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_inout); 
 }
 
 /* Generate mask
@@ -352,10 +438,39 @@ void generate_mask(Tensor *inout) {
  * @param [out] out: [N]
  * 'N' is the number of elements in the tensor.
  */
-void copy(Tensor *in, Tensor *out) {
-  size_t N = in->num_elem();
+// void copy(Tensor *in, Tensor *out) {
+//   size_t N = in->num_elem();
 
-  for (size_t i = 0; i < N; i++) { out->buf[i] = in->buf[i]; }
+//   for (size_t i = 0; i < N; i++) { out->buf[i] = in->buf[i]; }
+// }
+
+__global__ void copy_kernel(float *in, float *out, size_t N) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
+
+  if (idx < N) {
+    out[idx] = in[idx];
+  }
+}
+
+void copy(Tensor *in, Tensor *out) {
+  size_t N = in->num_elem(); 
+
+  float *d_in;
+  float *d_out; 
+
+  cudaMalloc(&d_in, N * sizeof(float));
+  cudaMalloc(&d_out, N * sizeof(float)); 
+
+  cudaMemcpy(d_in, in->buf, N * sizeof(float), cudaMemcpyHostToDevice);
+
+  dim3 blockDim(256);
+  dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
+  copy_kernel<<<gridDim, blockDim>>>(d_in, d_out, N);
+
+  cudaMemcpy(out->buf, d_out, N * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(d_in);
+  cudaFree(d_out); 
 }
 
 /* Add
