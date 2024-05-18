@@ -10,16 +10,56 @@
  * 's' is the number of tokens in the prompt.
  * 'H' is the hidden dimension.
  */
-void token_pos_embedding(vector<int> in, Tensor *wte, Tensor *wpe,
-                         Tensor *out) {
-  size_t s = in.size();
-  size_t H = wte->shape[1];
+// void token_pos_embedding(vector<int> in, Tensor *wte, Tensor *wpe,
+//                          Tensor *out) {
+//   size_t s = in.size();
+//   size_t H = wte->shape[1];
 
-  for (size_t i = 0; i < s; i++) {
-    for (size_t j = 0; j < H; j++) {
-      out->buf[i * H + j] = wte->buf[in[i] * H + j] + wpe->buf[i * H + j];
-    }
+//   for (size_t i = 0; i < s; i++) {
+//     for (size_t j = 0; j < H; j++) {
+//       out->buf[i * H + j] = wte->buf[in[i] * H + j] + wpe->buf[i * H + j];
+//     }
+//   }
+// }
+
+__global__ void token_pos_embedding_kernel(int *in, float *wte, float *wpe, float *out, size_t s, size_t H) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
+
+  if (idx < s * H) {
+    size_t i = idx / H; 
+    size_t j = idx % H; 
+    out[idx] = wte[in[i] * H + j] + wpe[i * H + j]; 
   }
+}
+
+void token_pos_embedding(vector<int> in, Tensor *wte, Tensor *wpe, Tensor *out) {
+  size_t s = in.size(); 
+  size_t H = wte->shape[1]; 
+
+  int *d_in; 
+  float *d_wte; 
+  float *d_wpe; 
+  float *d_out; 
+
+  cudaMalloc(&d_in, s * sizeof(int));
+  cudaMalloc(&d_wte, wte->num_elem() * sizeof(float));
+  cudaMalloc(&d_wpe, wpe->num_elem() * sizeof(float)); 
+  cudaMalloc(&d_out, s * H * sizeof(float));
+
+  cudaMemcpy(d_in, in.data(), s * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_wte, wte->buf, wte->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_wpe, wpe->buf, wpe->num_elem() * sizeof(float), cudaMemcpyHostToDevice); 
+
+  dim3 blockDim(256); 
+  dim3 gridDim((s * H + blockDim.x - 1) / blockDim.x); 
+  token_pos_embedding_kernel<<<gridDim, blockDim>>>(d_in, d_wte, d_wpe, d_out, s, H);
+
+  cudaMemcpy(out->buf, d_out, s * H * sizeof(float), cudaMemcpyDeviceToHost); 
+
+  cudaFree(d_in);
+  cudaFree(d_wte);
+  cudaFree(d_wpe);
+  cudaFree(d_out);
 }
 
 /* GELU
@@ -122,7 +162,7 @@ __global__ void linear_kernel(float *in, float *w, float *b, float *out, size_t 
   size_t col = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (row < M && col < N) {
-    float sum = 0.0f;
+    float sum = 0;
     for (size_t k = 0; k < K; k++) {
       sum += in[row * K + k] * w[k * N + col];
     }
@@ -137,7 +177,7 @@ void linear(Tensor *in, Tensor *w, Tensor *b, Tensor *out) {
 
   float *d_in;
   float *d_w;
-  float *d_b; 
+  float *d_b;
   float *d_out;
 
   cudaMalloc(&d_in, M * K * sizeof(float));
@@ -149,13 +189,17 @@ void linear(Tensor *in, Tensor *w, Tensor *b, Tensor *out) {
   cudaMemcpy(d_w, w->buf, K * N * sizeof(float), cudaMemcpyHostToDevice);
   cudaMemcpy(d_b, b->buf, N * sizeof(float), cudaMemcpyHostToDevice);
 
-  dim3 threadsPerBlock(16, 16);
-  dim3 blocksPerGrid((N + threadsPerBlock.x - 1) / threadsPerBlock.x, (M + threadsPerBlock.y - 1) / threadsPerBlock.y);
+  dim3 blockDim(16, 16);
+  dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y);
 
-  linear_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_in, d_w, d_b, d_out, M, K, N);
+  linear_kernel<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, M, K, N);
 
   cudaMemcpy(out->buf, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost);
-  // TODO consider cudaFree
+
+  cudaFree(d_in);
+  cudaFree(d_w);
+  cudaFree(d_b);
+  cudaFree(d_out);
 }
 
 /* Matmul
@@ -255,7 +299,10 @@ void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
   matmul_kernel<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N); 
 
   cudaMemcpy(out->buf, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost); 
-  // TODO consider cudaFree 
+
+  cudaFree(d_in1);
+  cudaFree(d_in2);
+  cudaFree(d_out);
 }
 
 /* Transpose

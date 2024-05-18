@@ -17,7 +17,6 @@ void scaling(Tensor *inout, float scale);
 /* Matmul operations */
 void linear(Tensor *in, Tensor *w, Tensor *b, Tensor *out);
 void matmul(Tensor *in1, Tensor *in2, Tensor *out);
-void matmul_cuda(Tensor *in1, Tensor *in2, Tensor *out);
 
 /* Data movement operations */
 void copy(Tensor *in, Tensor *out);
