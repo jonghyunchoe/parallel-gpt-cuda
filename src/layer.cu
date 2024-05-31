@@ -1,4 +1,5 @@
 #include "layer.h"
+#include <cstdio>
 
 #define TILE_SIZE 32 
 
@@ -23,18 +24,49 @@
 // }
 
 __global__ void token_pos_embedding_kernel(int *in, float *wte, float *wpe, float *out, size_t s, size_t H) {
+  // printf("Start\n");
+  // printf("s * H: %d\n", s * H);
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
+  // printf("idx: %d\n", idx);
+  // printf("H: %d\n", H);
 
   if (idx < s * H) {
+    // printf("Within if\n");
+    // printf("s * H: %d\n", s * H);
+    // printf("H: %zu\n", H);
+    // printf("On DEV: Size: %lu, Minus One: %d\n",(unsigned long)(sp->size), (int)-1);
+    // printf("%lu\n",(unsigned long)(H));
+
+    // printf("idx: %lu, H: %lu\n", (unsigned long)idx, (unsigned long)H);
+
+    // printf("idx: %d, H: %d\n", idx, H);
+    // printf("H: %d\n", H);
     size_t i = idx / H; 
     size_t j = idx % H; 
+    // printf("i: %lu, j: %lu, idx: %lu, H: %lu\n", (unsigned long)i, (unsigned long)j, (unsigned long)idx, (unsigned long)H);
+
+    // printf("wte[in[i] * H + j]: %f\n", wte[in[i] * H + j]);
+    // printf("wpe[i * H + j]: %f\n", wpe[i * H + j]);
+    // printf("H: %d\n", H);
+
+    // printf("idx: %lu, H: %lu\n", (unsigned long)idx, (unsigned long)H);
+
+    // printf("in[i]: %d\n", in[i]);
+    // printf("in[i] * H + j: %lu\n", (unsigned long)(in[i] * H + j));
+    // printf("wte[in[i] * H + j]: %f\n", wte[in[i] * H + j]);
+    // printf("wpe[i * H + j]: %f\n", wpe[i * H + j]);
+    // printf("out[idx]: %f\n", out[idx])
     out[idx] = wte[in[i] * H + j] + wpe[i * H + j]; 
+    // printf("out[%lu]: %f\n", (unsigned long)idx, out[idx]);
   }
+  // printf("out[%d]: %f\n", idx, out[idx]);
+  // printf("End\n");
 }
 
 void token_pos_embedding(vector<int> in, Tensor *wte, Tensor *wpe, Tensor *out) {
   size_t s = in.size(); 
   size_t H = wte->shape[1]; 
+  printf("wte->num_elem(): %lu\n", (unsigned long)(wte->num_elem()));
 
   int *d_in; 
   float *d_wte; 
@@ -61,6 +93,22 @@ void token_pos_embedding(vector<int> in, Tensor *wte, Tensor *wpe, Tensor *out) 
   cudaFree(d_wpe);
   cudaFree(d_out);
 }
+
+void token_pos_embedding(int *d_in, float *d_wte, float *d_wpe, float *d_out, size_t s, size_t H) {
+  printf("s: %zu, H: %zu\n", s, H);
+  
+  dim3 blockDim(256);
+  dim3 gridDim((s * H + blockDim.x - 1) / blockDim.x); 
+  token_pos_embedding_kernel<<<gridDim, blockDim>>>(d_in, d_wte, d_wpe, d_out, s, H);
+  // printf("End\n");
+
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+      fprintf(stderr, "Failed to launch token_pos_embedding_kernel (error code %s)!\n", cudaGetErrorString(err));
+      exit(EXIT_FAILURE);
+  }
+}
+
 
 /* GELU
  * @param [in & out] inout: [N]
@@ -105,6 +153,13 @@ void gelu(Tensor *inout) {
 
   cudaFree(d_inout);
 }
+
+void gelu(float *d_inout, size_t N) {
+    dim3 blockDim(256); 
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x); 
+    gelu_kernel<<<gridDim, blockDim>>>(d_inout, N);
+}
+
 
 /* Softmax (w/ Max Trick)
  * @param [in & out] inout: [s, H]
@@ -168,6 +223,12 @@ void softmax(Tensor *inout) {
   cudaMemcpy(inout->buf, d_inout, s * V * sizeof(float), cudaMemcpyDeviceToHost);
 
   cudaFree(d_inout);
+}
+
+void softmax(float *d_inout, size_t s, size_t V) {
+    dim3 blockDim(256);
+    dim3 gridDim((s + blockDim.x - 1) / blockDim.x);
+    softmax_kernel<<<gridDim, blockDim>>>(d_inout, s, V);
 }
 
 /* Layer Normalization
@@ -250,6 +311,11 @@ void layer_norm(Tensor *inout, Tensor *gamma, Tensor *beta) {
   cudaFree(d_beta);
 }
 
+void layer_norm(float *d_inout, float *d_gamma, float *d_beta, size_t s, size_t H, float eps) {
+    dim3 blockDim(256);
+    dim3 gridDim((s + blockDim.x - 1) / blockDim.x);
+    layer_norm_kernel<<<gridDim, blockDim>>>(d_inout, d_gamma, d_beta, s, H, eps);
+}
 
 /* Linear
  * @param [in1]  in: [M, K]
@@ -317,6 +383,12 @@ void linear(Tensor *in, Tensor *w, Tensor *b, Tensor *out) {
   cudaFree(d_w);
   cudaFree(d_b);
   cudaFree(d_out);
+}
+
+void linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t M, size_t K, size_t N) {
+    dim3 blockDim(16, 16);
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y);
+    linear_kernel<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, M, K, N);
 }
 
 /* Matmul
@@ -422,6 +494,12 @@ void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
   cudaFree(d_out);
 }
 
+void matmul(float *d_in1, float *d_in2, float *d_out, size_t M, size_t K, size_t N) {
+    dim3 blockDim(TILE_SIZE, TILE_SIZE);
+    dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
+    matmul_kernel<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N);
+}
+
 /* Transpose
  * @param [in1]  in: [M, N]
  * @param [out] out: [N, M]
@@ -466,6 +544,12 @@ void transpose(Tensor *in, Tensor *out) {
   cudaFree(d_out);
 }
 
+void transpose(float *d_in, float *d_out, size_t M, size_t N) {
+    dim3 blockDim(16, 16);
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y);
+    transpose_kernel<<<gridDim, blockDim>>>(d_in, d_out, M, N); 
+}
+
 /* Scaling
  * @param [in1 & out] inout: [N]
  * @param [in2]       scale: [1]
@@ -501,6 +585,12 @@ void scaling(Tensor *inout, float scale) {
   cudaMemcpy(inout->buf, d_inout, N * sizeof(float), cudaMemcpyDeviceToHost);
 
   cudaFree(d_inout); 
+}
+
+void scaling(float *d_inout, float scale, size_t N) {
+    dim3 blockDim(256);
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
+    scaling_kernel<<<gridDim, blockDim>>>(d_inout, scale, N); 
 }
 
 /* Generate mask
@@ -552,6 +642,12 @@ void generate_mask(Tensor *inout) {
   cudaFree(d_inout);
 }
 
+void generate_mask(float *d_inout, size_t s) {
+    dim3 blockDim(16, 16);
+    dim3 gridDim((s + blockDim.x - 1) / blockDim.x, (s + blockDim.y - 1) / blockDim.y);
+    generate_mask_kernel<<<gridDim, blockDim>>>(d_inout, s);
+}
+
 /* Copy
  * @param [in1]  in: [N]
  * @param [out] out: [N]
@@ -590,6 +686,12 @@ void copy(Tensor *in, Tensor *out) {
 
   cudaFree(d_in);
   cudaFree(d_out); 
+}
+
+void copy(float *d_in, float *d_out, size_t N) {
+    dim3 blockDim(256);
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
+    copy_kernel<<<gridDim, blockDim>>>(d_in, d_out, N);
 }
 
 /* Add
@@ -633,6 +735,12 @@ void add(Tensor *inout, Tensor *x) {
   add_kernel<<<(N + 255) / 256, 256>>>(d_inout, d_x, N);
 
   cudaMemcpy(inout->buf, d_inout, N * sizeof(float), cudaMemcpyDeviceToHost);
+}
+
+void add(float *d_inout, float *d_x, size_t N) {
+    dim3 blockDim(256);
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
+    add_kernel<<<gridDim, blockDim>>>(d_inout, d_x, N);
 }
 
 /* Split into QKV
@@ -688,6 +796,11 @@ void split_qkv(Tensor *in, Tensor *out) {
   cudaFree(d_out);
 }
 
+void split_qkv(float *d_in, float *d_out, size_t s, size_t H) {
+    dim3 blockDim(256);
+    dim3 gridDim((s * H + blockDim.x - 1) / blockDim.x);
+    split_qkv_kernel<<<gridDim, blockDim>>>(d_in, d_out, s, H, s * H);
+}
 
 /* Split into heads
  * @param [in1]  in: [3, s, H]
@@ -747,6 +860,12 @@ void split_head(Tensor *in, size_t n_head, Tensor *out) {
 
   cudaFree(d_in);
   cudaFree(d_out);
+}
+
+void split_head(float *d_in, float *d_out, size_t n_head, size_t s, size_t H) {
+    dim3 blockDim(256);
+    dim3 gridDim((3 * s * H + blockDim.x - 1) / blockDim.x);
+    split_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, n_head, s, H, 3 * s * H);
 }
 
 /* Extract Q, K, V from QKV head
@@ -821,6 +940,12 @@ void extract_qkv(Tensor *in, size_t head_idx, size_t n_head, Tensor *q, Tensor *
   cudaFree(d_v);
 }
 
+void extract_qkv(float *d_in, float *d_q, float *d_k, float *d_v, size_t head_idx, size_t n_head, size_t s, size_t H_) {
+    dim3 blockDim(256);
+    dim3 gridDim((s * H_ + blockDim.x - 1) / blockDim.x);
+    extract_qkv_kernel<<<gridDim, blockDim>>>(d_in, head_idx, n_head, d_q, d_k, d_v, s, H_, s * H_);
+}
+
 /* Merge each heads
  * @param [in1]       in: [s, H_]
  * @param [in2] head_idx: [1]
@@ -872,6 +997,12 @@ void merge_head(Tensor *in, size_t head_idx, size_t n_head, Tensor *out) {
 
   cudaFree(d_in);
   cudaFree(d_out);
+}
+
+void merge_head(float *d_in, float *d_out, size_t head_idx, size_t s, size_t H_) {
+    dim3 blockDim(256);
+    dim3 gridDim((s * H_ + blockDim.x - 1) / blockDim.x);
+    merge_head_kernel<<<gridDim, blockDim>>>(d_in, head_idx, s, H_, d_out);
 }
 
 /* Concatenate each heads
@@ -928,6 +1059,12 @@ void concat_head(Tensor *in, Tensor *out) {
 
   cudaFree(d_in);
   cudaFree(d_out);
+}
+
+void concat_head(float *d_in, float *d_out, size_t n_head, size_t s, size_t H_) {
+    dim3 blockDim(256);
+    dim3 gridDim((n_head * s * H_ + blockDim.x - 1) / blockDim.x);
+    concat_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, n_head, s, H_);
 }
 
 /* Greedy Max Sampling
