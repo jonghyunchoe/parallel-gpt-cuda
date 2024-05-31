@@ -226,6 +226,7 @@ void softmax(Tensor *inout) {
 }
 
 void softmax(float *d_inout, size_t s, size_t V) {
+    printf("s: %lu, V: %lu\n", (unsigned long)s, (unsigned long)V);
     dim3 blockDim(256);
     dim3 gridDim((s + blockDim.x - 1) / blockDim.x);
     softmax_kernel<<<gridDim, blockDim>>>(d_inout, s, V);
@@ -471,6 +472,8 @@ void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
   size_t K = in1->shape[1]; 
   size_t N = in2->shape[1]; 
 
+  printf("M: %lu, K: %lu, N: %lu\n", (unsigned long)M, (unsigned long)K, (unsigned long)N);
+
   float *d_in1; 
   float *d_in2; 
   float *d_out; 
@@ -495,6 +498,7 @@ void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
 }
 
 void matmul(float *d_in1, float *d_in2, float *d_out, size_t M, size_t K, size_t N) {
+    printf("M: %lu, K: %lu, N: %lu\n", (unsigned long)M, (unsigned long)K, (unsigned long)N);
     dim3 blockDim(TILE_SIZE, TILE_SIZE);
     dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
     matmul_kernel<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N);
@@ -797,6 +801,7 @@ void split_qkv(Tensor *in, Tensor *out) {
 }
 
 void split_qkv(float *d_in, float *d_out, size_t s, size_t H) {
+    printf("s, H: %lu, %lu\n", (unsigned long)s, (unsigned long)H);
     dim3 blockDim(256);
     dim3 gridDim((s * H + blockDim.x - 1) / blockDim.x);
     split_qkv_kernel<<<gridDim, blockDim>>>(d_in, d_out, s, H, s * H);
@@ -828,6 +833,7 @@ void split_qkv(float *d_in, float *d_out, size_t s, size_t H) {
 
 __global__ void split_head_kernel(float *in, float *out, size_t n_head, size_t s, size_t H, size_t N) {
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  // printf("s, H, N: %lu, %lu, %lu\n", (unsigned long)s, (unsigned long)H, (unsigned long)N);
 
   if (idx < N) {
     size_t i = idx / (n_head * s * (H / n_head));

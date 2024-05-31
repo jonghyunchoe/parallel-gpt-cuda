@@ -6,11 +6,25 @@
 #include "layer.h"
 #include "model.h"
 
+#define CHECK_CUDA(call)                                              \
+  do {                                                                \
+    cudaError_t status_ = call;                                       \
+    if (status_ != cudaSuccess) {                                     \
+      fprintf(stderr, "CUDA error (%s:%d): %s\n", __FILE__, __LINE__, \
+              cudaGetErrorString(status_));                           \
+      exit(EXIT_FAILURE);                                             \
+    }                                                                 \
+  } while (0)
+
 void print_device_pointer(float* d_ptr, size_t N) {
   float* h_ptr = (float*)malloc(N * sizeof(float));
   cudaMemcpy(h_ptr, d_ptr, N * sizeof(float), cudaMemcpyDeviceToHost);
-  for (size_t i = 0; i < N; ++i) {
-    printf("%lf ", h_ptr[i]);
+  for (size_t i = 0; i < N; i += 8) {
+    for (size_t j = 0; j < 8; j++) {
+      if ((i+j) < N)
+        printf("%lf ", h_ptr[i+j]);
+    }
+    printf("\n");
   }
   printf("\n");
   free(h_ptr);
@@ -84,6 +98,52 @@ void alloc_and_set_parameters(float *param) {
   pos += OFFSET7;
   wte = new Parameter({NUM_VOCAB, HIDDEN_DIM}, param + pos);
   pos += OFFSET8;
+
+  // /* Allocate device memory */
+  // for (int i = 0; i < NUM_LAYER; i++) {
+  //   cudaMalloc(&d_attn_b[order[i]], attn_b[order[i]]->num_elem() * sizeof(float));
+  //   cudaMalloc(&d_attn_w[order[i]], attn_w[order[i]]->num_elem() * sizeof(float));
+  //   cudaMalloc(&d_proj_b[order[i]], proj_b[order[i]]->num_elem() * sizeof(float));
+  //   cudaMalloc(&d_proj_w[order[i]], proj_w[order[i]]->num_elem() * sizeof(float));
+  //   cudaMalloc(&d_ln_1_b[order[i]], ln_1_b[order[i]]->num_elem() * sizeof(float));
+  //   cudaMalloc(&d_ln_1_g[order[i]], ln_1_g[order[i]]->num_elem() * sizeof(float));
+  //   cudaMalloc(&d_ln_2_b[order[i]], ln_2_b[order[i]]->num_elem() * sizeof(float));
+  //   cudaMalloc(&d_ln_2_g[order[i]], ln_2_g[order[i]]->num_elem() * sizeof(float));
+  //   cudaMalloc(&d_mlp1_b[order[i]], mlp1_b[order[i]]->num_elem() * sizeof(float));
+  //   cudaMalloc(&d_mlp1_w[order[i]], mlp1_w[order[i]]->num_elem() * sizeof(float));
+  //   cudaMalloc(&d_mlp2_b[order[i]], mlp2_b[order[i]]->num_elem() * sizeof(float));
+  //   cudaMalloc(&d_mlp2_w[order[i]], mlp2_w[order[i]]->num_elem() * sizeof(float));
+  // }
+  // cudaMalloc(&d_ln_f_b, ln_f_b->num_elem() * sizeof(float));
+  // cudaMalloc(&d_ln_f_g, ln_f_g->num_elem() * sizeof(float));
+  // cudaMalloc(&d_wpe, wpe->num_elem() * sizeof(float));
+  // cudaMalloc(&d_wte, wte->num_elem() * sizeof(float));
+  
+  // /* Copy data to device */
+  // for (int i = 0; i < NUM_LAYER; i++) {
+  //   cudaMemcpy(d_attn_b[order[i]], attn_b[order[i]]->buf, attn_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  //   cudaMemcpy(d_attn_w[order[i]], attn_w[order[i]]->buf, attn_w[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  //   cudaMemcpy(d_proj_b[order[i]], proj_b[order[i]]->buf, proj_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  //   cudaMemcpy(d_proj_w[order[i]], proj_w[order[i]]->buf, proj_w[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  //   cudaMemcpy(d_ln_1_b[order[i]], ln_1_b[order[i]]->buf, ln_1_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  //   cudaMemcpy(d_ln_1_g[order[i]], ln_1_g[order[i]]->buf, ln_1_g[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  //   cudaMemcpy(d_ln_2_b[order[i]], ln_2_b[order[i]]->buf, ln_2_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  //   cudaMemcpy(d_ln_2_g[order[i]], ln_2_g[order[i]]->buf, ln_2_g[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  //   cudaMemcpy(d_mlp1_b[order[i]], mlp1_b[order[i]]->buf, mlp1_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  //   cudaMemcpy(d_mlp1_w[order[i]], mlp1_w[order[i]]->buf, mlp1_w[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  //   cudaMemcpy(d_mlp2_b[order[i]], mlp2_b[order[i]]->buf, mlp2_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  //   cudaMemcpy(d_mlp2_w[order[i]], mlp2_w[order[i]]->buf, mlp2_w[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  // }
+  // cudaMemcpy(d_ln_f_b, ln_f_b->buf, ln_f_b->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  // cudaMemcpy(d_ln_f_g, ln_f_g->buf, ln_f_g->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  // cudaMemcpy(d_wpe, wpe->buf, wpe->num_elem() * sizeof(float), cudaMemcpyHostToDevice); 
+  // cudaMemcpy(d_wte, wte->buf, wte->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+}
+
+void alloc_and_set_device_parameters() {
+  int order[] = {
+      0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9,
+  };
 
   /* Allocate device memory */
   for (int i = 0; i < NUM_LAYER; i++) {
@@ -211,8 +271,7 @@ void alloc_activations(size_t prompt_size) {
   transformer_block_a = new Activation({prompt_size, HIDDEN_DIM});
 
   /* Allocate device memory */
-  // cudaMalloc(&d_embd_a, prompt_size * HIDDEN_DIM * sizeof(float));
-  cudaMalloc(&d_embd_a, embd_a->num_elem() * sizeof(float)); 
+  // cudaMalloc(&d_embd_a, embd_a->num_elem() * sizeof(float)); 
   cudaMalloc(&d_ffn_proj_a, ffn_proj_a->num_elem() * sizeof(float));
   cudaMalloc(&d_mha_qkv_proj_a, mha_qkv_proj_a->num_elem() * sizeof(float));
   cudaMalloc(&d_mha_out_a, mha_out_a->num_elem() * sizeof(float));
@@ -233,7 +292,7 @@ void alloc_activations(size_t prompt_size) {
   cudaMalloc(&d_transformer_block_a, transformer_block_a->num_elem() * sizeof(float));
 
   /* Copy data to device */
-  cudaMemcpy(d_embd_a, embd_a->buf, embd_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  // cudaMemcpy(d_embd_a, embd_a->buf, embd_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
   cudaMemcpy(d_ffn_proj_a, ffn_proj_a->buf, ffn_proj_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
   cudaMemcpy(d_mha_qkv_proj_a, mha_qkv_proj_a->buf, mha_qkv_proj_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
   cudaMemcpy(d_mha_out_a, mha_out_a->buf, mha_out_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
@@ -357,20 +416,64 @@ void ffn(float *d_in, float *d_mlp1_w, float *d_mlp1_b,
 void attention(float *d_q, float *d_k, float *d_v, float *d_mask, float *d_out, size_t seq_len, size_t head_dim) {
     /* Get Attention score by q @ k */
     transpose(d_k, d_k_transposed_a, seq_len, head_dim);
+    // printf("d_k\n");
+    // print_device_pointer(d_k, 10);
+    // printf(" -------------- \n");
+
+    // printf("d_k_transposed_a\n");
+    // print_device_pointer(d_k_transposed_a, 10);
+    // printf(" -------------- \n");
+
+    // printf("attn_score_a num_elem: %zu\n", attn_score_a->num_elem());
+    // cudaMemcpy(d_attn_score_a, attn_score_a->buf, attn_score_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+
+    // printf("d_attn_score_a\n");
+    // print_device_pointer(d_attn_score_a, 256);
+
+    // printf("attn_score_a: ");
+    // for (int i = 0; i < 256; i += 8) {  
+    //   for (int j = 0; j < 8; j++) {
+    //     printf("%f ", attn_score_a->buf[i+j]);
+    //   }
+    //   printf("\n"); 
+    // }
+    // printf("\n");
+
     matmul(d_q, d_k_transposed_a, d_attn_score_a, seq_len, head_dim, seq_len);
+
+    // printf("d_attn_score_a\n");
+    // print_device_pointer(d_attn_score_a, 256);
+    // exit(1);
 
     /* Scaling */
     scaling(d_attn_score_a, 1.0 / sqrt(head_dim), seq_len * seq_len);
 
+    // printf("d_attn_score_a\n");
+    // print_device_pointer(d_attn_score_a, 256);
+
     /* Masking */
     add(d_attn_score_a, d_mask, seq_len * seq_len);
 
+    // printf("d_attn_score_a\n");
+    // print_device_pointer(d_attn_score_a, 256);
+    // exit(1);
+
     /* Softmax */
     // TODO handle HIDDEN_DIM
-    softmax(d_attn_score_a, seq_len, HIDDEN_DIM);
+    // softmax(d_attn_score_a, seq_len, HIDDEN_DIM);
+    softmax(d_attn_score_a, seq_len, seq_len);
+
+    // printf("d_attn_score_a\n");
+    // print_device_pointer(d_attn_score_a, 256);
+    // exit(1);
 
     /* Attention score @ v */
     matmul(d_attn_score_a, d_v, d_out, seq_len, seq_len, head_dim);
+
+    // printf("d_out\n");
+    // print_device_pointer(d_out, 1000);
+    // exit(1);
+
 }
 
 /* (Masked) Multi-Head Self Attention
@@ -431,8 +534,14 @@ void mha(float *d_in, float *d_attn_b, float *d_attn_w,
     /* QKV projection: [seq_len, HIDDEN_DIM] -> [seq_len, 3*HIDDEN_DIM] */
     linear(d_in, d_attn_w, d_attn_b, d_mha_qkv_proj_a, seq_len, HIDDEN_DIM, 3 * HIDDEN_DIM);
 
+    // printf("d_mha_qkv_proj_a\n");
+    // print_device_pointer(d_mha_qkv_proj_a, 10);
+
     /* Split into Q, K, V: [seq_len, 3*HIDDEN_DIM] -> [3, seq_len, HIDDEN_DIM] */
-    split_qkv(d_mha_qkv_proj_a, d_mha_split_qkv_a, seq_len, HIDDEN_DIM);
+    split_qkv(d_mha_qkv_proj_a, d_mha_split_qkv_a, seq_len, 3*HIDDEN_DIM);
+
+    // printf("d_mha_split_qkv_a\n");
+    // print_device_pointer(d_mha_split_qkv_a, 10);
 
     /* Split into multiple heads: [3, seq_len, HIDDEN_DIM] -> [3, NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] */
     split_head(d_mha_split_qkv_a, d_mha_split_head_a, NUM_HEAD, seq_len, HIDDEN_DIM);
@@ -440,23 +549,53 @@ void mha(float *d_in, float *d_attn_b, float *d_attn_w,
     /* Generate mask to hide future inputs */
     generate_mask(d_mha_mask_a, seq_len);
 
+    // printf("d_mha_mask_a\n");
+    // print_device_pointer(d_mha_mask_a, 10);
+
     /* Perform Attention over each head: [NUM_HEAD, 3, seq_len, HIDDEN_DIM/NUM_HEAD] -> [NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] */
     for (size_t idx = 0; idx < NUM_HEAD; idx++) {
         /* Extract Q, K, V from qkv_head */
         extract_qkv(d_mha_split_head_a, d_mha_q_a, d_mha_k_a, d_mha_v_a, idx, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
 
+        // printf("d_mha_split_head_a\n");
+        // print_device_pointer(d_mha_split_head_a, 10);
+        // printf(" -------------- \n");
+        // exit(1);
+
+        // printf("d_mha_q_a\n");
+        // print_device_pointer(d_mha_q_a, 10);
+
+        // printf("d_mha_k_a\n");
+        // print_device_pointer(d_mha_k_a, 10);
+
         /* Attention */
         attention(d_mha_q_a, d_mha_k_a, d_mha_v_a, d_mha_mask_a, d_mha_attn_out_a, seq_len, HIDDEN_DIM / NUM_HEAD);
 
+        // printf("d_mha_attn_out_a\n");
+        // print_device_pointer(d_mha_attn_out_a, 10);
+        // exit(1);
+
         /* Merge each head's attn output [seq_len, HIDDEN_DIM/NUM_HEAD] -> [NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] */
         merge_head(d_mha_attn_out_a, d_mha_merge_head_a, idx, seq_len, HIDDEN_DIM / NUM_HEAD);
+
+        // printf("d_mha_merge_head_a\n");
+        // print_device_pointer(d_mha_merge_head_a, 10);
+        // exit(1);
     }
+
+    // printf("d_mha_merge_head_a\n");
+    // print_device_pointer(d_mha_merge_head_a, 10);
+    // exit(1);
 
     /* Concat each heads: [NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] -> [seq_len, HIDDEN_DIM] */
     concat_head(d_mha_merge_head_a, d_mha_concat_head_a, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
 
     /* OUT projection: [seq_len, HIDDEN_DIM] -> [seq_len, HIDDEN_DIM] */
     linear(d_mha_concat_head_a, d_proj_w, d_proj_b, d_out, seq_len, HIDDEN_DIM, HIDDEN_DIM);
+
+    // printf("d_out\n");
+    // print_device_pointer(d_out, 10);
+    // exit(1);
 }
 
 
@@ -512,18 +651,31 @@ void transformer_block(float *d_in, float *d_attn_b, float *d_attn_w,
                        float *d_mlp2_w, float *d_out, size_t seq_len) { 
     /* Copy Residual */
     copy(d_in, d_residual_a, seq_len * HIDDEN_DIM);
+
+    // printf("d_residual_a: ");
+    // print_device_pointer(d_residual_a, 10);
+
+    // printf("d_ln_1_g: ");
+    // print_device_pointer(d_ln_1_g, 10);
+
+    // printf("d_ln_1_b: ");
+    // print_device_pointer(d_ln_1_b, 10);
     
     /* Layer Normalization */
     layer_norm(d_in, d_ln_1_g, d_ln_1_b, seq_len, HIDDEN_DIM, 1e-5);
 
-    printf("d_in: ");
-    print_device_pointer(d_in, 10);
+    // printf("d_in: ");
+    // print_device_pointer(d_in, 10);
 
     /* Masked Multi-Head Self-Attention */
     mha(d_in, d_attn_b, d_attn_w, d_proj_b, d_proj_w, d_mha_out_a, seq_len);
 
     /* Add Residual */
     add(d_mha_out_a, d_residual_a, seq_len * HIDDEN_DIM);
+
+    // printf("d_mha_out_a: ");
+    // print_device_pointer(d_mha_out_a, 10);
+    // exit(1);
 
     /* Copy Residual */
     copy(d_mha_out_a, d_residual_a, seq_len * HIDDEN_DIM);
@@ -536,6 +688,10 @@ void transformer_block(float *d_in, float *d_attn_b, float *d_attn_w,
 
     /* Add Residual */
     add(d_out, d_residual_a, seq_len * HIDDEN_DIM);
+
+    // printf("d_out: ");
+    // print_device_pointer(d_out, 10);
+    // exit(1);
 }
 
 /* [Model Computation: Token Generation] */
@@ -612,6 +768,8 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
       cudaMalloc(&d_input_prompt, prompt_size * sizeof(int));
       cudaMemcpy(d_input_prompt, input_prompt.data(), prompt_size * sizeof(int), cudaMemcpyHostToDevice);
 
+      alloc_and_set_device_parameters();
+
       /* Inner loop: generate next token */
       for (size_t t = 0; t < n_token; t++) {
         /* Initialize activations */
@@ -620,28 +778,28 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         /* Token + Positional Embedding */
         // token_pos_embedding(input_prompt, wte, wpe, embd_a);
 
-        int *d_input_prompt_2;
-        float *d_wte_2;
-        float *d_wpe_2;
-        float *d_embd_a_2;
+        cudaMalloc(&d_input_prompt, prompt_size * sizeof(int));
+        cudaMalloc(&d_wpe, wpe->num_elem() * sizeof(float));
+        cudaMalloc(&d_wte, wte->num_elem() * sizeof(float));
+        cudaMalloc(&d_embd_a, embd_a->num_elem() * sizeof(float)); 
 
-        cudaMalloc(&d_input_prompt_2, prompt_size * sizeof(int));
-        cudaMalloc(&d_wte_2, NUM_VOCAB * HIDDEN_DIM * sizeof(float));
-        cudaMalloc(&d_wpe_2, MAX_SEQ_LEN * HIDDEN_DIM * sizeof(float));
-        cudaMalloc(&d_embd_a_2, prompt_size * HIDDEN_DIM * sizeof(float));
+        cudaMemcpy(d_input_prompt, input_prompt.data(), prompt_size * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_wpe, wpe->buf, wpe->num_elem() * sizeof(float), cudaMemcpyHostToDevice); 
+        cudaMemcpy(d_wte, wte->buf, wte->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_embd_a, embd_a->buf, embd_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
 
-        cudaMemcpy(d_input_prompt_2, input_prompt.data(), prompt_size * sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_wte_2, wte->buf, NUM_VOCAB * HIDDEN_DIM * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_wpe_2, wpe->buf, MAX_SEQ_LEN * HIDDEN_DIM * sizeof(float), cudaMemcpyHostToDevice);
+        printf("d_input_prompt: ");
+        print_device_pointer(d_input_prompt, 10);
+        printf("d_wte: ");
+        print_device_pointer(d_wte, 10);
+        printf("d_wpe: ");
+        print_device_pointer(d_wpe, 10);
 
-        token_pos_embedding(d_input_prompt_2, d_wte_2, d_wpe_2, d_embd_a_2, prompt_size, HIDDEN_DIM);
-        // token_pos_embedding(d_input_prompt, d_wte, d_wpe, d_embd_a, prompt_size, HIDDEN_DIM);
+        token_pos_embedding(d_input_prompt, d_wte, d_wpe, d_embd_a, prompt_size, HIDDEN_DIM);
+        CHECK_CUDA(cudaGetLastError());
 
         printf("d_embd_a: ");
         print_device_pointer(d_embd_a, 10);
-
-        printf("d_embd_a_2: ");
-        print_device_pointer(d_embd_a_2, 10);
 
         /* Forward path of Transformer blocks */
         for (size_t l = 0; l < NUM_LAYER; l++) {
@@ -655,25 +813,53 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
                                       d_transformer_block_a, prompt_size);
 
           printf("d_transformer_block_a: ");
-          print_device_pointer(d_transformer_block_a, 10);
+          print_device_pointer(d_transformer_block_a, 100);
 
           /* Copy output to embd_a for next block */
           // copy(transformer_block_a, embd_a);
           copy(d_transformer_block_a, d_embd_a, prompt_size * HIDDEN_DIM);
         }
+        // exit(1);
 
         /* Final Layer Normalization */
         // layer_norm(embd_a, ln_f_g, ln_f_b);
         layer_norm(d_embd_a, d_ln_f_g, d_ln_f_b, embd_a->shape[0], embd_a->shape[1], 1e-5);
 
+        printf("d_embd_a: ");
+        print_device_pointer(d_embd_a, 4000);
+        // exit(1);
+
         /* Projection to vocab. dimension */
         // transpose(wte, wte_transposed_a);
         transpose(d_wte, d_wte_transposed_a, wte->shape[0], wte->shape[1]);
         // matmul(embd_a, wte_transposed_a, logit_a);
-        matmul(d_embd_a, d_wte_transposed_a, d_logit_a, embd_a->shape[0], wte->shape[0], wte->shape[1]);
+
+        printf("d_wte_transposed_a: ");
+        print_device_pointer(d_wte_transposed_a, 10);
+
+        printf("logit_a: ");
+        for (int i = 0; i < 1000; i += 8) {  
+          for (int j = 0; j < 8; j++) {
+            printf("%f ", embd_a->buf[i+j]);
+          }
+          printf("\n"); 
+        }
+        printf("\n");
+        printf("before matmul\n");
+
+        // cudaMemcpy(d_logit_a, logit_a->buf, logit_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+
+        printf("d_logit_a: ");
+        print_device_pointer(d_logit_a, 1000);
+        // exit(1);
+
+        matmul(d_embd_a, d_wte_transposed_a, d_logit_a, embd_a->shape[0], embd_a->shape[1], wte->shape[0]);
 
         // printf("d_embd_a: ");
         // print_device_pointer(d_embd_a, 10);
+        printf("d_logit_a: ");
+        print_device_pointer(d_logit_a, 1000);
+        // exit(1);
 
         // TODO 
         cudaMemcpy(logit_a->buf, d_logit_a, logit_a->num_elem() * sizeof(float), cudaMemcpyDeviceToHost);
