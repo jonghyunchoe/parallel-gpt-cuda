@@ -66,7 +66,7 @@ __global__ void token_pos_embedding_kernel(int *in, float *wte, float *wpe, floa
 void token_pos_embedding(vector<int> in, Tensor *wte, Tensor *wpe, Tensor *out) {
   size_t s = in.size(); 
   size_t H = wte->shape[1]; 
-  printf("wte->num_elem(): %lu\n", (unsigned long)(wte->num_elem()));
+  // printf("wte->num_elem(): %lu\n", (unsigned long)(wte->num_elem()));
 
   int *d_in; 
   float *d_wte; 
@@ -95,7 +95,7 @@ void token_pos_embedding(vector<int> in, Tensor *wte, Tensor *wpe, Tensor *out) 
 }
 
 void token_pos_embedding(int *d_in, float *d_wte, float *d_wpe, float *d_out, size_t s, size_t H) {
-  printf("s: %zu, H: %zu\n", s, H);
+  // printf("s: %zu, H: %zu\n", s, H);
   
   dim3 blockDim(256);
   dim3 gridDim((s * H + blockDim.x - 1) / blockDim.x); 
@@ -226,7 +226,7 @@ void softmax(Tensor *inout) {
 }
 
 void softmax(float *d_inout, size_t s, size_t V) {
-    printf("s: %lu, V: %lu\n", (unsigned long)s, (unsigned long)V);
+    // printf("s: %lu, V: %lu\n", (unsigned long)s, (unsigned long)V);
     dim3 blockDim(256);
     dim3 gridDim((s + blockDim.x - 1) / blockDim.x);
     softmax_kernel<<<gridDim, blockDim>>>(d_inout, s, V);
@@ -472,7 +472,7 @@ void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
   size_t K = in1->shape[1]; 
   size_t N = in2->shape[1]; 
 
-  printf("M: %lu, K: %lu, N: %lu\n", (unsigned long)M, (unsigned long)K, (unsigned long)N);
+  // printf("M: %lu, K: %lu, N: %lu\n", (unsigned long)M, (unsigned long)K, (unsigned long)N);
 
   float *d_in1; 
   float *d_in2; 
@@ -498,7 +498,7 @@ void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
 }
 
 void matmul(float *d_in1, float *d_in2, float *d_out, size_t M, size_t K, size_t N) {
-    printf("M: %lu, K: %lu, N: %lu\n", (unsigned long)M, (unsigned long)K, (unsigned long)N);
+    // printf("M: %lu, K: %lu, N: %lu\n", (unsigned long)M, (unsigned long)K, (unsigned long)N);
     dim3 blockDim(TILE_SIZE, TILE_SIZE);
     dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
     matmul_kernel<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N);
@@ -801,7 +801,7 @@ void split_qkv(Tensor *in, Tensor *out) {
 }
 
 void split_qkv(float *d_in, float *d_out, size_t s, size_t H) {
-    printf("s, H: %lu, %lu\n", (unsigned long)s, (unsigned long)H);
+    // printf("s, H: %lu, %lu\n", (unsigned long)s, (unsigned long)H);
     dim3 blockDim(256);
     dim3 gridDim((s * H + blockDim.x - 1) / blockDim.x);
     split_qkv_kernel<<<gridDim, blockDim>>>(d_in, d_out, s, H, s * H);

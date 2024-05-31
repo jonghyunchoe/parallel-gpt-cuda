@@ -271,7 +271,7 @@ void alloc_activations(size_t prompt_size) {
   transformer_block_a = new Activation({prompt_size, HIDDEN_DIM});
 
   /* Allocate device memory */
-  // cudaMalloc(&d_embd_a, embd_a->num_elem() * sizeof(float)); 
+  // cudaMalloc(&d_embd_a, embd_a->num_elem() * sizeof(float));
   cudaMalloc(&d_ffn_proj_a, ffn_proj_a->num_elem() * sizeof(float));
   cudaMalloc(&d_mha_qkv_proj_a, mha_qkv_proj_a->num_elem() * sizeof(float));
   cudaMalloc(&d_mha_out_a, mha_out_a->num_elem() * sizeof(float));
@@ -292,7 +292,7 @@ void alloc_activations(size_t prompt_size) {
   cudaMalloc(&d_transformer_block_a, transformer_block_a->num_elem() * sizeof(float));
 
   /* Copy data to device */
-  // cudaMemcpy(d_embd_a, embd_a->buf, embd_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+  // cudaMemcpy(d_embd_a, embd_a->buf, embd_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice); 
   cudaMemcpy(d_ffn_proj_a, ffn_proj_a->buf, ffn_proj_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
   cudaMemcpy(d_mha_qkv_proj_a, mha_qkv_proj_a->buf, mha_qkv_proj_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
   cudaMemcpy(d_mha_out_a, mha_out_a->buf, mha_out_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
@@ -334,25 +334,25 @@ void free_activations() {
   delete logit_a;
   delete transformer_block_a;
 
-  // cudaFree(d_embd_a);
-  // cudaFree(d_ffn_proj_a);
-  // cudaFree(d_mha_qkv_proj_a);
-  // cudaFree(d_mha_out_a);
-  // cudaFree(d_mha_split_qkv_a);
-  // cudaFree(d_mha_split_head_a);
-  // cudaFree(d_mha_mask_a);
-  // cudaFree(d_mha_merge_head_a);
-  // cudaFree(d_mha_q_a);
-  // cudaFree(d_mha_k_a);
-  // cudaFree(d_mha_v_a);
-  // cudaFree(d_mha_attn_out_a);
-  // cudaFree(d_mha_concat_head_a);
-  // cudaFree(d_attn_score_a);
-  // cudaFree(d_k_transposed_a);
-  // cudaFree(d_wte_transposed_a);
-  // cudaFree(d_residual_a);
-  // cudaFree(d_logit_a);
-  // cudaFree(d_transformer_block_a);
+  cudaFree(d_embd_a);
+  cudaFree(d_ffn_proj_a);
+  cudaFree(d_mha_qkv_proj_a);
+  cudaFree(d_mha_out_a);
+  cudaFree(d_mha_split_qkv_a);
+  cudaFree(d_mha_split_head_a);
+  cudaFree(d_mha_mask_a);
+  cudaFree(d_mha_merge_head_a);
+  cudaFree(d_mha_q_a);
+  cudaFree(d_mha_k_a);
+  cudaFree(d_mha_v_a);
+  cudaFree(d_mha_attn_out_a);
+  cudaFree(d_mha_concat_head_a);
+  cudaFree(d_attn_score_a);
+  cudaFree(d_k_transposed_a);
+  cudaFree(d_wte_transposed_a);
+  cudaFree(d_residual_a);
+  cudaFree(d_logit_a);
+  cudaFree(d_transformer_block_a);
 }
 
 /* (Position-wise) Feed-Forward Network
@@ -754,8 +754,10 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
   int mpi_rank;
   MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
   if (mpi_rank == 0) {
+    alloc_and_set_device_parameters();
     /* Outer loop: generate tokens for each prompt */
     for (size_t p = 0; p < n_prompt; p++) {
+      printf("--- Prompt %zu ---\n", p);
       int prompt_size = tokens_per_prompt;
 
       /* Initialize input prompt */
@@ -768,7 +770,7 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
       cudaMalloc(&d_input_prompt, prompt_size * sizeof(int));
       cudaMemcpy(d_input_prompt, input_prompt.data(), prompt_size * sizeof(int), cudaMemcpyHostToDevice);
 
-      alloc_and_set_device_parameters();
+      // alloc_and_set_device_parameters();
 
       /* Inner loop: generate next token */
       for (size_t t = 0; t < n_token; t++) {
@@ -788,18 +790,18 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         cudaMemcpy(d_wte, wte->buf, wte->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
         cudaMemcpy(d_embd_a, embd_a->buf, embd_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
 
-        printf("d_input_prompt: ");
-        print_device_pointer(d_input_prompt, 10);
-        printf("d_wte: ");
-        print_device_pointer(d_wte, 10);
-        printf("d_wpe: ");
-        print_device_pointer(d_wpe, 10);
+        // printf("d_input_prompt: ");
+        // print_device_pointer(d_input_prompt, 10);
+        // printf("d_wte: ");
+        // print_device_pointer(d_wte, 10);
+        // printf("d_wpe: ");
+        // print_device_pointer(d_wpe, 10);
 
         token_pos_embedding(d_input_prompt, d_wte, d_wpe, d_embd_a, prompt_size, HIDDEN_DIM);
-        CHECK_CUDA(cudaGetLastError());
+        // CHECK_CUDA(cudaGetLastError());
 
-        printf("d_embd_a: ");
-        print_device_pointer(d_embd_a, 10);
+        // printf("d_embd_a: ");
+        // print_device_pointer(d_embd_a, 10);
 
         /* Forward path of Transformer blocks */
         for (size_t l = 0; l < NUM_LAYER; l++) {
@@ -812,8 +814,8 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
                                       d_mlp1_b[l], d_mlp1_w[l], d_mlp2_b[l], d_mlp2_w[l],
                                       d_transformer_block_a, prompt_size);
 
-          printf("d_transformer_block_a: ");
-          print_device_pointer(d_transformer_block_a, 100);
+          // printf("d_transformer_block_a: ");
+          // print_device_pointer(d_transformer_block_a, 100);
 
           /* Copy output to embd_a for next block */
           // copy(transformer_block_a, embd_a);
@@ -825,8 +827,8 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         // layer_norm(embd_a, ln_f_g, ln_f_b);
         layer_norm(d_embd_a, d_ln_f_g, d_ln_f_b, embd_a->shape[0], embd_a->shape[1], 1e-5);
 
-        printf("d_embd_a: ");
-        print_device_pointer(d_embd_a, 4000);
+        // printf("d_embd_a: ");
+        // print_device_pointer(d_embd_a, 4000);
         // exit(1);
 
         /* Projection to vocab. dimension */
@@ -834,31 +836,31 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         transpose(d_wte, d_wte_transposed_a, wte->shape[0], wte->shape[1]);
         // matmul(embd_a, wte_transposed_a, logit_a);
 
-        printf("d_wte_transposed_a: ");
-        print_device_pointer(d_wte_transposed_a, 10);
+        // printf("d_wte_transposed_a: ");
+        // print_device_pointer(d_wte_transposed_a, 10);
 
-        printf("logit_a: ");
-        for (int i = 0; i < 1000; i += 8) {  
-          for (int j = 0; j < 8; j++) {
-            printf("%f ", embd_a->buf[i+j]);
-          }
-          printf("\n"); 
-        }
-        printf("\n");
-        printf("before matmul\n");
+        // printf("logit_a: ");
+        // for (int i = 0; i < 1000; i += 8) {  
+        //   for (int j = 0; j < 8; j++) {
+        //     printf("%f ", embd_a->buf[i+j]);
+        //   }
+        //   printf("\n"); 
+        // }
+        // printf("\n");
+        // printf("before matmul\n");
 
         // cudaMemcpy(d_logit_a, logit_a->buf, logit_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
 
-        printf("d_logit_a: ");
-        print_device_pointer(d_logit_a, 1000);
+        // printf("d_logit_a: ");
+        // print_device_pointer(d_logit_a, 1000);
         // exit(1);
 
         matmul(d_embd_a, d_wte_transposed_a, d_logit_a, embd_a->shape[0], embd_a->shape[1], wte->shape[0]);
 
         // printf("d_embd_a: ");
         // print_device_pointer(d_embd_a, 10);
-        printf("d_logit_a: ");
-        print_device_pointer(d_logit_a, 1000);
+        // printf("d_logit_a: ");
+        // print_device_pointer(d_logit_a, 1000);
         // exit(1);
 
         // TODO 
@@ -884,6 +886,7 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         /* Finalize activations for next token generation */
         free_activations();
       }
+      cudaFree(d_input_prompt);
     }
   }
 }
