@@ -1113,28 +1113,28 @@ __global__ void top1_sampling_kernel(float *in, int *out, size_t V) {
   }
 }
 
-// int top1_sampling(Tensor *in) {
-//   size_t s = in->shape[0];
-//   size_t V = in->shape[1];
+int top1_sampling(Tensor *in) {
+  size_t s = in->shape[0];
+  size_t V = in->shape[1];
 
-//   float *d_in;
-//   int *d_out;
-//   int out;
+  float *d_in;
+  int *d_out;
+  int out;
 
-//   cudaMalloc(&d_in, s * V * sizeof(float));
-//   cudaMalloc(&d_out, sizeof(int));
+  cudaMalloc(&d_in, s * V * sizeof(float));
+  cudaMalloc(&d_out, sizeof(int));
 
-//   cudaMemcpy(d_in, in->buf, s * V * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_in, in->buf, s * V * sizeof(float), cudaMemcpyHostToDevice);
 
-//   top1_sampling_kernel<<<1, 1>>>(d_in + (s - 1) * V, d_out, V);
+  top1_sampling_kernel<<<1, 1>>>(d_in + (s - 1) * V, d_out, V);
 
-//   cudaMemcpy(&out, d_out, sizeof(int), cudaMemcpyDeviceToHost);
+  cudaMemcpy(&out, d_out, sizeof(int), cudaMemcpyDeviceToHost);
 
-//   cudaFree(d_in);
-//   cudaFree(d_out);
+  cudaFree(d_in);
+  cudaFree(d_out);
 
-//   return out;
-// }
+  return out;
+}
 
 void top1_sampling(float *d_in, int *d_out, size_t s, size_t V) {
   top1_sampling_kernel<<<1, 1>>>(d_in + (s - 1) * V, d_out, V);
