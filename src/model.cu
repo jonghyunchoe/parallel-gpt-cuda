@@ -271,7 +271,7 @@ void alloc_activations(size_t prompt_size) {
   transformer_block_a = new Activation({prompt_size, HIDDEN_DIM});
 
   /* Allocate device memory */
-  // cudaMalloc(&d_embd_a, embd_a->num_elem() * sizeof(float));
+  cudaMalloc(&d_embd_a, embd_a->num_elem() * sizeof(float));
   cudaMalloc(&d_ffn_proj_a, ffn_proj_a->num_elem() * sizeof(float));
   cudaMalloc(&d_mha_qkv_proj_a, mha_qkv_proj_a->num_elem() * sizeof(float));
   cudaMalloc(&d_mha_out_a, mha_out_a->num_elem() * sizeof(float));
@@ -755,9 +755,10 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
   MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
   if (mpi_rank == 0) {
     alloc_and_set_device_parameters();
+    printf("\n");
     /* Outer loop: generate tokens for each prompt */
     for (size_t p = 0; p < n_prompt; p++) {
-      // printf("--- Prompt %zu ---\n", p);
+      printf("--- Prompt %zu ---\n", p);
       int prompt_size = tokens_per_prompt;
 
       /* Initialize input prompt */
@@ -770,13 +771,15 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
       cudaMalloc(&d_input_prompt, prompt_size * sizeof(int));
       cudaMemcpy(d_input_prompt, input_prompt.data(), prompt_size * sizeof(int), cudaMemcpyHostToDevice);
 
+      alloc_activations(prompt_size + n_token - 1);
       /* Inner loop: generate next token */
+
       for (size_t t = 0; t < n_token; t++) {
         int *d_out;
         cudaMalloc(&d_out, sizeof(int));
 
         /* Initialize activations */
-        alloc_activations(prompt_size);
+        // alloc_activations(prompt_size);
 
         /* Token + Positional Embedding */
         // token_pos_embedding(input_prompt, wte, wpe, embd_a);
@@ -784,12 +787,12 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         cudaMalloc(&d_input_prompt, prompt_size * sizeof(int));
         cudaMalloc(&d_wpe, wpe->num_elem() * sizeof(float));
         cudaMalloc(&d_wte, wte->num_elem() * sizeof(float));
-        cudaMalloc(&d_embd_a, embd_a->num_elem() * sizeof(float)); 
+        // cudaMalloc(&d_embd_a, embd_a->num_elem() * sizeof(float)); 
 
         cudaMemcpy(d_input_prompt, input_prompt.data(), prompt_size * sizeof(int), cudaMemcpyHostToDevice);
         cudaMemcpy(d_wpe, wpe->buf, wpe->num_elem() * sizeof(float), cudaMemcpyHostToDevice); 
         cudaMemcpy(d_wte, wte->buf, wte->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_embd_a, embd_a->buf, embd_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+        // cudaMemcpy(d_embd_a, embd_a->buf, embd_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
 
         // printf("d_input_prompt: ");
         // print_device_pointer(d_input_prompt, 10);
@@ -826,7 +829,10 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
 
         /* Final Layer Normalization */
         // layer_norm(embd_a, ln_f_g, ln_f_b);
-        layer_norm(d_embd_a, d_ln_f_g, d_ln_f_b, embd_a->shape[0], embd_a->shape[1], 1e-5);
+
+        // TODO change 
+        // layer_norm(d_embd_a, d_ln_f_g, d_ln_f_b, embd_a->shape[0], embd_a->shape[1], 1e-5);
+        layer_norm(d_embd_a, d_ln_f_g, d_ln_f_b, prompt_size, HIDDEN_DIM, 1e-5);
 
         // printf("d_embd_a: ");
         // print_device_pointer(d_embd_a, 4000);
@@ -856,7 +862,9 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         // print_device_pointer(d_logit_a, 1000);
         // exit(1);
 
-        matmul(d_embd_a, d_wte_transposed_a, d_logit_a, embd_a->shape[0], embd_a->shape[1], wte->shape[0]);
+        // TODO change 
+        // matmul(d_embd_a, d_wte_transposed_a, d_logit_a, embd_a->shape[0], embd_a->shape[1], wte->shape[0]);
+        matmul(d_embd_a, d_wte_transposed_a, d_logit_a, prompt_size, HIDDEN_DIM, wte->shape[0]);
 
         // printf("d_embd_a: ");
         // print_device_pointer(d_embd_a, 10);
@@ -875,7 +883,9 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         // printf("\n");
 
         /* Greedy sampling (only last timestep is considered) */
-        top1_sampling(d_logit_a, d_out, logit_a->shape[0], logit_a->shape[1]);
+        // TODO change 
+        // top1_sampling(d_logit_a, d_out, logit_a->shape[0], logit_a->shape[1]);
+        top1_sampling(d_logit_a, d_out, prompt_size, NUM_VOCAB);
 
         // int next_token_id = how? 
         int next_token_id;
@@ -892,9 +902,10 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         output[p * n_token + t] = next_token_id;
 
         /* Finalize activations for next token generation */
-        free_activations();
+        // free_activations();
       }
       cudaFree(d_input_prompt);
+      free_activations();
     }
   }
 }
