@@ -785,13 +785,13 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         // token_pos_embedding(input_prompt, wte, wpe, embd_a);
 
         cudaMalloc(&d_input_prompt, prompt_size * sizeof(int));
-        cudaMalloc(&d_wpe, wpe->num_elem() * sizeof(float));
-        cudaMalloc(&d_wte, wte->num_elem() * sizeof(float));
+        // cudaMalloc(&d_wpe, wpe->num_elem() * sizeof(float));
+        // cudaMalloc(&d_wte, wte->num_elem() * sizeof(float));
         // cudaMalloc(&d_embd_a, embd_a->num_elem() * sizeof(float)); 
 
         cudaMemcpy(d_input_prompt, input_prompt.data(), prompt_size * sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_wpe, wpe->buf, wpe->num_elem() * sizeof(float), cudaMemcpyHostToDevice); 
-        cudaMemcpy(d_wte, wte->buf, wte->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
+        // cudaMemcpy(d_wpe, wpe->buf, wpe->num_elem() * sizeof(float), cudaMemcpyHostToDevice); 
+        // cudaMemcpy(d_wte, wte->buf, wte->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
         // cudaMemcpy(d_embd_a, embd_a->buf, embd_a->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
 
         // printf("d_input_prompt: ");
