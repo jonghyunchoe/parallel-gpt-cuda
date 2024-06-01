@@ -757,7 +757,7 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
     alloc_and_set_device_parameters();
     /* Outer loop: generate tokens for each prompt */
     for (size_t p = 0; p < n_prompt; p++) {
-      printf("--- Prompt %zu ---\n", p);
+      // printf("--- Prompt %zu ---\n", p);
       int prompt_size = tokens_per_prompt;
 
       /* Initialize input prompt */
@@ -772,6 +772,9 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
 
       /* Inner loop: generate next token */
       for (size_t t = 0; t < n_token; t++) {
+        int *d_out;
+        cudaMalloc(&d_out, sizeof(int));
+
         /* Initialize activations */
         alloc_activations(prompt_size);
 
@@ -862,8 +865,8 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         // exit(1);
 
         // TODO 
-        printf("logit_a->num_elem(): %zu\n", logit_a->num_elem());
-        cudaMemcpy(logit_a->buf, d_logit_a, logit_a->num_elem() * sizeof(float), cudaMemcpyDeviceToHost);
+        // printf("logit_a->num_elem(): %zu\n", logit_a->num_elem());
+        // cudaMemcpy(logit_a->buf, d_logit_a, logit_a->num_elem() * sizeof(float), cudaMemcpyDeviceToHost);
 
         // Print values of logit_a
         // printf("logit_a: ");
@@ -872,7 +875,13 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         // printf("\n");
 
         /* Greedy sampling (only last timestep is considered) */
-        int next_token_id = top1_sampling(logit_a);
+        top1_sampling(d_logit_a, d_out, logit_a->shape[0], logit_a->shape[1]);
+
+        // int next_token_id = how? 
+        int next_token_id;
+        cudaMemcpy(&next_token_id, d_out, sizeof(int), cudaMemcpyDeviceToHost);
+
+        // int next_token_id = top1_sampling(logit_a);
         printf("next_token_id: %d\n", next_token_id);
 
         /* Update input prompt and prompt size */

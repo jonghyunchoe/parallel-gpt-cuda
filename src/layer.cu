@@ -1,5 +1,6 @@
 #include "layer.h"
 #include <cstdio>
+#include <cmath>
 
 #define TILE_SIZE 32 
 
@@ -1079,18 +1080,63 @@ void concat_head(float *d_in, float *d_out, size_t n_head, size_t s, size_t H_) 
  * 's' is the number of tokens in the prompt.
  * 'V' is the number of vocabulary.
  */
-int top1_sampling(Tensor *in) {
-  size_t s = in->shape[0];
-  size_t V = in->shape[1];
+// int top1_sampling(Tensor *in) {
+//   size_t s = in->shape[0];
+//   size_t V = in->shape[1];
 
-  int out = 0;
-  float max = -INFINITY;
-  for (size_t i = 0; i < V; i++) {
-    if (in->buf[(s - 1) * V + i] > max) {
-      max = in->buf[(s - 1) * V + i];
-      out = i;
+//   int out = 0;
+//   float max = -INFINITY;
+//   for (size_t i = 0; i < V; i++) {
+//     if (in->buf[(s - 1) * V + i] > max) {
+//       max = in->buf[(s - 1) * V + i];
+//       out = i;
+//     }
+//   }
+
+//   return out;
+// }
+
+// TODO improve kernel 
+__global__ void top1_sampling_kernel(float *in, int *out, size_t V) {
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    float max_val = -INFINITY;
+    int max_idx = 0;
+    
+    for (size_t i = 0; i < V; i++) {
+      if (in[i] > max_val) {
+        max_val = in[i];
+        max_idx = i;
+      }
     }
+    
+    *out = max_idx;
   }
-
-  return out;
 }
+
+// int top1_sampling(Tensor *in) {
+//   size_t s = in->shape[0];
+//   size_t V = in->shape[1];
+
+//   float *d_in;
+//   int *d_out;
+//   int out;
+
+//   cudaMalloc(&d_in, s * V * sizeof(float));
+//   cudaMalloc(&d_out, sizeof(int));
+
+//   cudaMemcpy(d_in, in->buf, s * V * sizeof(float), cudaMemcpyHostToDevice);
+
+//   top1_sampling_kernel<<<1, 1>>>(d_in + (s - 1) * V, d_out, V);
+
+//   cudaMemcpy(&out, d_out, sizeof(int), cudaMemcpyDeviceToHost);
+
+//   cudaFree(d_in);
+//   cudaFree(d_out);
+
+//   return out;
+// }
+
+void top1_sampling(float *d_in, int *d_out, size_t s, size_t V) {
+  top1_sampling_kernel<<<1, 1>>>(d_in + (s - 1) * V, d_out, V);
+}
+

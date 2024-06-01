@@ -53,3 +53,4 @@ void split_head(float *d_in, float *d_out, size_t n_head, size_t s, size_t H);
 void extract_qkv(float *d_in, float *d_q, float *d_k, float *d_v, size_t head_idx, size_t n_head, size_t s, size_t H_);
 void merge_head(float *d_in, float *d_out, size_t head_idx, size_t s, size_t H_);
 void concat_head(float *d_in, float *d_out, size_t n_head, size_t s, size_t H_);
+void top1_sampling(float *d_in, int *d_out, size_t s, size_t V);
