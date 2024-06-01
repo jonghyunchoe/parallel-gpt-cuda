@@ -768,23 +768,23 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
 
       // Temporary 
       int *d_input_prompt; 
-      cudaMalloc(&d_input_prompt, prompt_size * sizeof(int));
-      cudaMemcpy(d_input_prompt, input_prompt.data(), prompt_size * sizeof(int), cudaMemcpyHostToDevice);
+      cudaMalloc(&d_input_prompt, (prompt_size + n_token - 1) * sizeof(int));
+      // cudaMemcpy(d_input_prompt, input_prompt.data(), prompt_size * sizeof(int), cudaMemcpyHostToDevice);
+
+      int *d_out;
+      cudaMalloc(&d_out, sizeof(int));
 
       alloc_activations(prompt_size + n_token - 1);
+
       /* Inner loop: generate next token */
-
       for (size_t t = 0; t < n_token; t++) {
-        int *d_out;
-        cudaMalloc(&d_out, sizeof(int));
-
         /* Initialize activations */
         // alloc_activations(prompt_size);
 
         /* Token + Positional Embedding */
         // token_pos_embedding(input_prompt, wte, wpe, embd_a);
 
-        cudaMalloc(&d_input_prompt, prompt_size * sizeof(int));
+        // cudaMalloc(&d_input_prompt, prompt_size * sizeof(int));
         // cudaMalloc(&d_wpe, wpe->num_elem() * sizeof(float));
         // cudaMalloc(&d_wte, wte->num_elem() * sizeof(float));
         // cudaMalloc(&d_embd_a, embd_a->num_elem() * sizeof(float)); 
