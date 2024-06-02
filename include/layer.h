@@ -73,3 +73,5 @@ void batch_extract_qkv(float *d_in, float *d_q, float *d_k, float *d_v, size_t b
 void batch_merge_head(float *d_in, float *d_out, size_t batch_size, size_t n_head, size_t head_idx, size_t s, size_t H_);
 void batch_concat_head(float *d_in, float *d_out, size_t batch_size, size_t n_head, size_t s, size_t H_);
 void batch_top1_sampling(float *d_in, int *d_out, size_t batch_size, size_t s, size_t V);
+
+void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N);

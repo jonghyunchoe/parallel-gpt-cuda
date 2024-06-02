@@ -615,54 +615,186 @@ void matmul(float *d_in1, float *d_in2, float *d_out, size_t M, size_t K, size_t
     matmul_kernel<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N);
 }
 
-__global__ void batch_matmul_kernel(float *A, float *B, float *C, size_t batch_size, size_t M, size_t K, size_t N) {
-    __shared__ float A_shared[TILE_SIZE][TILE_SIZE];
-    __shared__ float B_shared[TILE_SIZE][TILE_SIZE];   
+// __global__ void batch_matmul_kernel(float *A, float *B, float *C, size_t batch_size, size_t M, size_t K, size_t N) {
+//     __shared__ float A_shared[TILE_SIZE][TILE_SIZE];
+//     __shared__ float B_shared[TILE_SIZE][TILE_SIZE];   
+
+//     size_t batch_id = blockIdx.z;
+//     int global_row = blockIdx.y * blockDim.y + threadIdx.y;
+//     int global_col = blockIdx.x * blockDim.x + threadIdx.x; 
+//     int local_row = threadIdx.y;
+//     int local_col = threadIdx.x; 
+
+//     float sum = 0.0f;
+
+//     for (int k = 0; k < (K + TILE_SIZE - 1) / TILE_SIZE; k++) {
+//         int A_local_row = global_row * K + k * TILE_SIZE + local_col; 
+//         int B_local_col = (k * TILE_SIZE + local_row) * N + global_col; 
+
+//         if (global_row < M && k * TILE_SIZE + local_col < K) {
+//             A_shared[local_row][local_col] = A[batch_id * M * K + A_local_row];
+//         } else {
+//             A_shared[local_row][local_col] = 0.0f; 
+//         }
+
+//         if (global_col < N && k * TILE_SIZE + local_row < K) {
+//             B_shared[local_row][local_col] = B[batch_id * K * N + B_local_col];
+//         } else {
+//             B_shared[local_row][local_col] = 0.0f; 
+//         }
+
+//         __syncthreads();
+
+//         for (int n = 0; n < TILE_SIZE; n++) {
+//             sum += A_shared[local_row][n] * B_shared[n][local_col];
+//         }
+
+//         __syncthreads(); 
+//     }
+
+//     if (global_row < M && global_col < N) {
+//         // printf("batch_id: %lu, global_row: %d, global_col: %d sum: %f\n", (unsigned long)batch_id, global_row, global_col, sum);
+//         C[batch_id * M * N + global_row * N + global_col] = sum; 
+//     }
+// }
+
+// void batch_matmul(float *d_A, float *d_B, float *d_C, size_t batch_size, size_t M, size_t K, size_t N) {
+//     dim3 blockDim(TILE_SIZE, TILE_SIZE);
+//     dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
+//     batch_matmul_kernel<<<gridDim, blockDim>>>(d_A, d_B, d_C, batch_size, M, K, N);
+// }
+
+__global__ void batch_matmul_kernel(float *in1, float *in2, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t idy = blockIdx.y * blockDim.y + threadIdx.y;
 
     size_t batch_id = blockIdx.z;
-    int global_row = blockIdx.y * blockDim.y + threadIdx.y;
-    int global_col = blockIdx.x * blockDim.x + threadIdx.x; 
-    int local_row = threadIdx.y;
-    int local_col = threadIdx.x; 
 
-    float sum = 0.0f;
-
-    for (int k = 0; k < (K + TILE_SIZE - 1) / TILE_SIZE; k++) {
-        int A_local_row = global_row * K + k * TILE_SIZE + local_col; 
-        int B_local_col = (k * TILE_SIZE + local_row) * N + global_col; 
-
-        if (global_row < M && k * TILE_SIZE + local_col < K) {
-            A_shared[local_row][local_col] = A[batch_id * M * K + A_local_row];
-        } else {
-            A_shared[local_row][local_col] = 0.0f; 
+    if (idx < N && idy < M) {
+        float sum = 0;
+        for (size_t k = 0; k < K; k++) {
+            sum += in1[batch_id * M * K + idy * K + k] * in2[batch_id * K * N + k * N + idx];
         }
+        // if ((batch_id * M * N + idy * N + idx) < 2000) 
+        // if ((batch_id * M * N + idy * N + idx) > 10000 && (batch_id * M * N + idy * N + idx) < 12000) 
+        // if ((batch_id * M * N + idy * N + idx) > (50257 * 16 - 100) && (batch_id * M * N + idy * N + idx) < (50257 * 16)) 
+        // if (batch_id == 1) {
+        //   printf("batch_id * M * N + idy * N + idx: %lu batch_id: %lu, idy: %lu, idx: %lu, sum: %f\n", (unsigned long)(batch_id * M * N + idy * N + idx), (unsigned long)batch_id, (unsigned long)idy, (unsigned long)idx, sum);
+        //   printf("batch_id * M * N: %lu M: %lu N: %lu\n", (unsigned long)(batch_id * M * N), (unsigned long)M, (unsigned long)N);
+        // }
 
-        if (global_col < N && k * TILE_SIZE + local_row < K) {
-            B_shared[local_row][local_col] = B[batch_id * K * N + B_local_col];
-        } else {
-            B_shared[local_row][local_col] = 0.0f; 
-        }
-
-        __syncthreads();
-
-        for (int n = 0; n < TILE_SIZE; n++) {
-            sum += A_shared[local_row][n] * B_shared[n][local_col];
-        }
-
-        __syncthreads(); 
-    }
-
-    if (global_row < M && global_col < N) {
-        printf("batch_id: %lu, global_row: %d, global_col: %d sum: %f\n", (unsigned long)batch_id, global_row, global_col, sum);
-        C[batch_id * M * N + global_row * N + global_col] = sum; 
+        // if ((batch_id * M * N + idy * N + idx) > (50257 * 16) && (batch_id * M * N + idy * N + idx) < (50257 * 32)) 
+        //   printf("batch_id * M * N + idy * N + idx: %lu batch_id: %lu, idy: %lu, idx: %lu, sum: %f\n", (unsigned long)(batch_id * M * N + idy * N + idx), (unsigned long)batch_id, (unsigned long)idy, (unsigned long)idx, sum);
+          // printf("batch_id: %lu, idy: %lu, idx: %lu, sum: %f\n", (unsigned long)batch_id, (unsigned long)idy, (unsigned long)idx, sum);
+        // printf("batch_id: %lu, idy: %lu, idx: %lu, sum: %f\n", (unsigned long)batch_id, (unsigned long)idy, (unsigned long)idx, sum);
+        out[batch_id * M * N + idy * N + idx] = sum;
     }
 }
 
-void batch_matmul(float *d_A, float *d_B, float *d_C, size_t batch_size, size_t M, size_t K, size_t N) {
-    dim3 blockDim(TILE_SIZE, TILE_SIZE);
-    dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
-    batch_matmul_kernel<<<gridDim, blockDim>>>(d_A, d_B, d_C, batch_size, M, K, N);
+void batch_matmul(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+    // printf("batch_size: %lu, M: %lu, K: %lu, N: %lu\n", (unsigned long)batch_size, (unsigned long)M, (unsigned long)K, (unsigned long)N);
+    dim3 blockDim(16, 16); 
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size); 
+    batch_matmul_kernel<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
 }
+
+// __global__ void batch_matmul_kernel_final(float *in1, float *in2, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
+//     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     size_t idy = blockIdx.y * blockDim.y + threadIdx.y;
+
+//     size_t batch_id = blockIdx.z;
+
+//     // if (batch_id == 0) 
+//     //   printf("batch_id: %lu, idy: %lu, idx: %lu\n", (unsigned long)batch_id, (unsigned long)idy, (unsigned long)idx);
+//     if (batch_id == 1) {
+//       printf("batch_id: %lu, idy: %lu, idx: %lu batch_id * M * N + idy * N + idx: %lu\n", (unsigned long)batch_id, (unsigned long)idy, (unsigned long)idx, (unsigned long)(batch_id * M * N + idy * N + idx));
+//       // printf("batch_id: %lu, idy: %lu, idx: %lu\n", (unsigned long)batch_id, (unsigned long)idy, (unsigned long)idx);
+//     }
+
+//     if (idx < N && idy < M) {
+//         // if (batch_id == 1) {
+//         //   printf("batch_id: %lu, idy: %lu, idx: %lu batch_id * M * N + idy * N + idx: %lu\n", (unsigned long)batch_id, (unsigned long)idy, (unsigned long)idx, (unsigned long)(batch_id * M * N + idy * N + idx));
+//         //   // printf("batch_id: %lu, idy: %lu, idx: %lu\n", (unsigned long)batch_id, (unsigned long)idy, (unsigned long)idx);
+//         // }
+//         float sum = 0;
+//         for (size_t k = 0; k < K; k++) {
+//             sum += in1[batch_id * M * K + idy * K + k] * in2[batch_id * K * N + k * N + idx];
+//             // sum += in1[batch_id * M * K + idy * K + k] * in2[K * N + k * N + idx];
+//         }
+//         // if ((batch_id * M * N + idy * N + idx) < 2000) 
+//         // if ((batch_id * M * N + idy * N + idx) > 10000 && (batch_id * M * N + idy * N + idx) < 12000) 
+//         // if ((batch_id * M * N + idy * N + idx) > (50257 * 16 - 100) && (batch_id * M * N + idy * N + idx) < (50257 * 16)) 
+//         // if (batch_id == 1) {
+//         //   printf("* batch_id * M * N + idy * N + idx: %lu batch_id: %lu, idy: %lu, idx: %lu, sum: %f\n", (unsigned long)(batch_id * M * N + idy * N + idx), (unsigned long)batch_id, (unsigned long)idy, (unsigned long)idx, sum);
+//         //   // printf("batch_id * M * N: %lu M: %lu N: %lu\n", (unsigned long)(batch_id * M * N), (unsigned long)M, (unsigned long)N);
+//         // }
+
+//         // if ((batch_id * M * N + idy * N + idx) > (50257 * 16) && (batch_id * M * N + idy * N + idx) < (50257 * 32)) 
+//         //   printf("batch_id * M * N + idy * N + idx: %lu batch_id: %lu, idy: %lu, idx: %lu, sum: %f\n", (unsigned long)(batch_id * M * N + idy * N + idx), (unsigned long)batch_id, (unsigned long)idy, (unsigned long)idx, sum);
+//           // printf("batch_id: %lu, idy: %lu, idx: %lu, sum: %f\n", (unsigned long)batch_id, (unsigned long)idy, (unsigned long)idx, sum);
+//         // printf("batch_id: %lu, idy: %lu, idx: %lu, sum: %f\n", (unsigned long)batch_id, (unsigned long)idy, (unsigned long)idx, sum);
+//         out[batch_id * M * N + idy * N + idx] = sum;
+//     }
+// }
+
+__global__ void batch_matmul_kernel_final(float *in1, float *in2, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t idy = blockIdx.y * blockDim.y + threadIdx.y;
+    size_t batch_id = blockIdx.z;
+
+    if (idx < N && idy < M) {
+        float sum = 0;
+        for (size_t k = 0; k < K; k++) {
+            sum += in1[batch_id * M * K + idy * K + k] * in2[k * N + idx];
+        }
+        out[batch_id * M * N + idy * N + idx] = sum;
+    }
+}
+
+
+
+// void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+//     printf("batch_size: %lu, M: %lu, K: %lu, N: %lu\n", (unsigned long)batch_size, (unsigned long)M, (unsigned long)K, (unsigned long)N);
+//     // dim3 blockDim(16, 16); 
+//     // dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size); 
+
+//     dim3 blockDim(16, 16);
+//     dim3 gridDim((50257 + 16 - 1) / 16, (16 + 16 - 1) / 16, 2);
+
+//     // dim3 blockDim(16, 16);
+//     // dim3 gridDim((N + 15) / 16, (M + 15) / 16, batch_size);
+
+//     // dim3 blockDim(512);
+//     // dim3 gridDim((N + 511) / 512, M, batch_size);
+
+//     printf("gridDim: (%d, %d, %d), blockDim: (%d, %d, %d)\n", gridDim.x, gridDim.y, gridDim.z, blockDim.x, blockDim.y, blockDim.z);
+
+//     batch_matmul_kernel_final<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
+
+//     cudaError_t err = cudaGetLastError();
+//     if (err != cudaSuccess) {
+//         printf("CUDA Error: %s\n", cudaGetErrorString(err));
+//     }
+//     cudaDeviceSynchronize();  // Ensure all kernels complete before proceeding
+// }
+
+void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+    printf("batch_size: %lu, M: %lu, K: %lu, N: %lu\n", (unsigned long)batch_size, (unsigned long)M, (unsigned long)K, (unsigned long)N);
+
+    dim3 blockDim(16, 16);
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
+
+    printf("gridDim: (%d, %d, %d), blockDim: (%d, %d, %d)\n", gridDim.x, gridDim.y, gridDim.z, blockDim.x, blockDim.y, blockDim.z);
+
+    batch_matmul_kernel_final<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
+}
+
 
 /* Transpose
  * @param [in1]  in: [M, N]

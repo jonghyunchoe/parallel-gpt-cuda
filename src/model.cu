@@ -34,6 +34,74 @@ void print_device_pointer(float* d_ptr, size_t N) {
   free(h_ptr);
 }
 
+
+void print_device_pointer(float* d_ptr, size_t N, size_t stride) {
+  float* h_ptr = (float*)malloc((N) * sizeof(float));
+  cudaMemcpy(h_ptr, d_ptr + stride * sizeof(float), N * sizeof(float), cudaMemcpyDeviceToHost);
+  for (size_t i = 0; i < N; i += 8) {
+    for (size_t j = 0; j < 8; j++) {
+      if ((i+j) < N)
+        printf("%lf ", h_ptr[i+j+stride]);
+    }
+    printf("\n");
+  }
+  printf("\n");
+  free(h_ptr);
+}
+
+void print_batch_device_pointer(float* d_ptr, size_t N, size_t batch_stride) {
+  float* h_ptr = (float*)malloc((N + batch_stride)* sizeof(float));
+  cudaMemcpy(h_ptr, d_ptr, (N + batch_stride) * sizeof(float), cudaMemcpyDeviceToHost);
+  for (size_t i = 0; i < N; i += 8) {
+    for (size_t j = 0; j < 8; j++) {
+      if ((i+j) < N)
+        printf("%lf ", h_ptr[i+j]);
+    }
+    printf("\n");
+  }
+
+  printf("\n");
+  printf("next prompt: \n"); 
+
+  for (size_t i = 0; i < N; i += 8) {
+    for (size_t j = 0; j < 8; j++) {
+      if ((i+j) < N)
+        printf("%lf ", h_ptr[i+j + batch_stride]);
+    }
+    printf("\n");
+  }
+
+  printf("\n");
+  free(h_ptr);
+}
+
+void print_batch_device_pointer(int* d_ptr, size_t N, size_t batch_stride) {
+  float* h_ptr = (float*)malloc((N + batch_stride)* sizeof(int));
+  cudaMemcpy(h_ptr, d_ptr, (N + batch_stride) * sizeof(int), cudaMemcpyDeviceToHost);
+  for (size_t i = 0; i < N; i += 8) {
+    for (size_t j = 0; j < 8; j++) {
+      if ((i+j) < N)
+        std::cout << h_ptr[i+j] << " ";
+    }
+    printf("\n");
+  }
+
+  printf("\n");
+  printf("next prompt: \n"); 
+
+  for (size_t i = 0; i < N; i += 8) {
+    for (size_t j = 0; j < 8; j++) {
+      if ((i+j) < N)
+        std::cout << h_ptr[i+j + batch_stride] << " ";
+    }
+    printf("\n");
+  }
+
+  printf("\n");
+  free(h_ptr);
+}
+
+
 void print_device_pointer(int* d_ptr, size_t N) {
   int* h_ptr = (int*)malloc(N * sizeof(int));
   cudaMemcpy(h_ptr, d_ptr, N * sizeof(int), cudaMemcpyDeviceToHost);
@@ -258,6 +326,9 @@ void alloc_activations(size_t prompt_size) {
   cudaMalloc(&d_k_transposed_a, HIDDEN_DIM / NUM_HEAD * prompt_size * sizeof(float));
   cudaMalloc(&d_wte_transposed_a, HIDDEN_DIM * NUM_VOCAB * sizeof(float));
   cudaMalloc(&d_residual_a, prompt_size * HIDDEN_DIM * sizeof(float));
+  printf("prompt_size: %zu\n", prompt_size);
+  printf("NUM_VOCAB: %d\n", NUM_VOCAB);
+  printf("d_logit_a size: %zu\n", prompt_size * NUM_VOCAB);
   cudaMalloc(&d_logit_a, prompt_size * NUM_VOCAB * sizeof(float));
   cudaMalloc(&d_transformer_block_a, prompt_size * HIDDEN_DIM * sizeof(float));
 }
@@ -474,30 +545,47 @@ void mha(float *d_in, float *d_attn_b, float *d_attn_w,
     // linear(d_in, d_attn_w, d_attn_b, d_mha_qkv_proj_a, seq_len, HIDDEN_DIM, 3 * HIDDEN_DIM);
     batch_linear(d_in, d_attn_w, d_attn_b, d_mha_qkv_proj_a, batch_size, seq_len, HIDDEN_DIM, 3 * HIDDEN_DIM);
 
-    printf("\n");
-    printf("d_mha_qkv_proj_a\n");
-    print_device_pointer(d_mha_qkv_proj_a, 1000);
+    // printf("\n");
+    // printf("d_mha_qkv_proj_a\n");
+    // print_device_pointer(d_mha_qkv_proj_a, 1000);
+    // exit(1);
+
+    // printf("d_mha_qkv_proj_a: ");
+    // print_batch_device_pointer(d_mha_qkv_proj_a, 1000, 12288 * 3);
     // exit(1);
 
     /* Split into Q, K, V: [seq_len, 3*HIDDEN_DIM] -> [3, seq_len, HIDDEN_DIM] */
     // split_qkv(d_mha_qkv_proj_a, d_mha_split_qkv_a, seq_len, 3*HIDDEN_DIM);
     batch_split_qkv(d_mha_qkv_proj_a, d_mha_split_qkv_a, batch_size, seq_len, 3 * HIDDEN_DIM);
 
-    printf("d_mha_split_qkv_a\n");
-    print_device_pointer(d_mha_split_qkv_a, 1000);
+    // printf("d_mha_split_qkv_a\n");
+    // print_device_pointer(d_mha_split_qkv_a, 1000);
+    // exit(1);
+
+    // printf("d_mha_split_qkv_a: ");
+    // print_batch_device_pointer(d_mha_split_qkv_a, 1000, 12288 * 3);
     // exit(1);
 
     /* Split into multiple heads: [3, seq_len, HIDDEN_DIM] -> [3, NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] */
     // split_head(d_mha_split_qkv_a, d_mha_split_head_a, NUM_HEAD, seq_len, HIDDEN_DIM);
     batch_split_head(d_mha_split_qkv_a, d_mha_split_head_a, batch_size, NUM_HEAD, seq_len, HIDDEN_DIM); // / NUM_HEAD);
 
-    printf("d_mha_split_head_a\n");
-    print_device_pointer(d_mha_split_head_a, 1000);
+    // printf("d_mha_split_head_a\n");
+    // print_device_pointer(d_mha_split_head_a, 1000);
+    // exit(1);
+
+    // printf("d_mha_split_head_a: ");
+    // print_device_pointer(d_mha_split_head_a, 1000, 12 * 12288 * 3);
+    // // print_batch_device_pointer(d_mha_split_head_a, 1000, 12 * 12288 * 3);
     // exit(1);
 
     /* Generate mask to hide future inputs */
     // generate_mask(d_mha_mask_a, seq_len);
     batch_generate_mask(d_mha_mask_a, batch_size, seq_len);
+
+    // printf("d_mha_mask_a\n");
+    // print_batch_device_pointer(d_mha_mask_a, 100, 256);
+    // exit(1);
 
     // printf("d_mha_mask_a\n");
     // print_device_pointer(d_mha_mask_a, 10);
@@ -508,33 +596,52 @@ void mha(float *d_in, float *d_attn_b, float *d_attn_w,
         // extract_qkv(d_mha_split_head_a, d_mha_q_a, d_mha_k_a, d_mha_v_a, idx, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
         batch_extract_qkv(d_mha_split_head_a, d_mha_q_a, d_mha_k_a, d_mha_v_a, batch_size, idx, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
 
-        printf("d_mha_split_head_a\n");
-        print_device_pointer(d_mha_split_head_a, 1000);
-        printf(" -------------- \n");
+        // printf("d_mha_split_head_a\n");
+        // print_device_pointer(d_mha_split_head_a, 1000);
+        // printf(" -------------- \n");
         // exit(1);
 
-        printf("d_mha_q_a\n");
-        print_device_pointer(d_mha_q_a, 1000);
+        // printf("d_mha_q_a\n");
+        // print_device_pointer(d_mha_q_a, 1000);
         // exit(1);
 
-        printf("d_mha_k_a\n");
-        print_device_pointer(d_mha_k_a, 1000);
+        // printf("d_mha_k_a\n");
+        // print_device_pointer(d_mha_k_a, 1000);
+        // exit(1);
+
+        // printf("d_mha_q_a: ");
+        // print_batch_device_pointer(d_mha_q_a, 1000, 1024);
+
+        // printf("d_mha_k_a: ");
+        // print_batch_device_pointer(d_mha_k_a, 1000, 1024);
+
+
+        // printf("d_mha_v_a: ");
+        // print_batch_device_pointer(d_mha_v_a, 1000, 1024);
         // exit(1);
 
         /* Attention */
         // TODO change
         attention(d_mha_q_a, d_mha_k_a, d_mha_v_a, d_mha_mask_a, d_mha_attn_out_a, seq_len, HIDDEN_DIM / NUM_HEAD, batch_size);
 
-        printf("d_mha_attn_out_a\n");
-        print_device_pointer(d_mha_attn_out_a, 1000);
+        // printf("d_mha_attn_out_a\n");
+        // print_device_pointer(d_mha_attn_out_a, 1000);
+        // exit(1);
+
+        // printf("d_mha_attn_out_a: ");
+        // print_batch_device_pointer(d_mha_attn_out_a, 1000, 1024);
         // exit(1);
 
         /* Merge each head's attn output [seq_len, HIDDEN_DIM/NUM_HEAD] -> [NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] */
         // merge_head(d_mha_attn_out_a, d_mha_merge_head_a, idx, seq_len, HIDDEN_DIM / NUM_HEAD);
         batch_merge_head(d_mha_attn_out_a, d_mha_merge_head_a, batch_size, NUM_HEAD, idx, seq_len, HIDDEN_DIM / NUM_HEAD);
         
-        printf("d_mha_merge_head_a\n");
-        print_device_pointer(d_mha_merge_head_a, 1000);
+        // printf("d_mha_merge_head_a\n");
+        // print_device_pointer(d_mha_merge_head_a, 1000);
+        // exit(1);
+
+        // printf("d_mha_merge_head_a: ");
+        // print_batch_device_pointer(d_mha_merge_head_a, 1000, 12288);
         // exit(1);
     }
 
@@ -543,13 +650,23 @@ void mha(float *d_in, float *d_attn_b, float *d_attn_w,
     // exit(1);
 
     /* Concat each heads: [NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] -> [seq_len, HIDDEN_DIM] */
-    concat_head(d_mha_merge_head_a, d_mha_concat_head_a, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
+    // concat_head(d_mha_merge_head_a, d_mha_concat_head_a, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
+    batch_concat_head(d_mha_merge_head_a, d_mha_concat_head_a, batch_size, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
+
+    // printf("d_mha_concat_head_a\n");
+    // print_batch_device_pointer(d_mha_concat_head_a, 1000, 12288);
+    // exit(1);
 
     /* OUT projection: [seq_len, HIDDEN_DIM] -> [seq_len, HIDDEN_DIM] */
-    linear(d_mha_concat_head_a, d_proj_w, d_proj_b, d_out, seq_len, HIDDEN_DIM, HIDDEN_DIM);
+    // linear(d_mha_concat_head_a, d_proj_w, d_proj_b, d_out, seq_len, HIDDEN_DIM, HIDDEN_DIM);
+    batch_linear(d_mha_concat_head_a, d_proj_w, d_proj_b, d_out, batch_size, seq_len, HIDDEN_DIM, HIDDEN_DIM);
 
-    printf("d_out\n");
-    print_device_pointer(d_out, 1000);
+    // printf("d_out\n");
+    // print_device_pointer(d_out, 1000);
+    // exit(1);
+
+    // printf("d_out\n");
+    // print_batch_device_pointer(d_out, 1000, 12288);
     // exit(1);
 }
 
@@ -608,8 +725,12 @@ void transformer_block(float *d_in, float *d_attn_b, float *d_attn_w,
     // copy(d_in, d_residual_a, seq_len * HIDDEN_DIM);
     batch_copy(d_in, d_residual_a, batch_size, seq_len * HIDDEN_DIM);
 
-    printf("d_residual_a: ");
-    print_device_pointer(d_residual_a, 1000);
+    // printf("d_residual_a: ");
+    // print_device_pointer(d_residual_a, 1000);
+    // exit(1);
+
+    // printf("d_residual_a: ");
+    // print_batch_device_pointer(d_residual_a, 1000, 12288);
     // exit(1);
 
     // printf("d_ln_1_g: ");
@@ -622,20 +743,29 @@ void transformer_block(float *d_in, float *d_attn_b, float *d_attn_w,
     // layer_norm(d_in, d_ln_1_g, d_ln_1_b, seq_len, HIDDEN_DIM, 1e-5);
     batch_layer_norm(d_in, d_ln_1_g, d_ln_1_b, batch_size, seq_len, HIDDEN_DIM, 1e-5);
 
-    printf("d_in: ");
-    print_device_pointer(d_in, 1000);
+    // printf("d_in: ");
+    // print_device_pointer(d_in, 1000);
     // exit(1);
+  
+    // printf("d_in: ");
+    // print_batch_device_pointer(d_in, 1000, 12288);
+    // exit(1);
+
 
     /* Masked Multi-Head Self-Attention */
     // mha(d_in, d_attn_b, d_attn_w, d_proj_b, d_proj_w, d_mha_out_a, seq_len);
     mha(d_in, d_attn_b, d_attn_w, d_proj_b, d_proj_w, d_mha_out_a, seq_len, batch_size);
 
+    // printf("d_mha_out_a: ");
+    // print_batch_device_pointer(d_mha_out_a, 1000, 12288);
+    // exit(1);
+
     /* Add Residual */
     // add(d_mha_out_a, d_residual_a, seq_len * HIDDEN_DIM);
     batch_add(d_mha_out_a, d_residual_a, batch_size, seq_len * HIDDEN_DIM);
 
-    printf("d_mha_out_a: ");
-    print_device_pointer(d_mha_out_a, 1000);
+    // printf("d_mha_out_a: ");
+    // print_device_pointer(d_mha_out_a, 1000);
     // exit(1);
 
     /* Copy Residual */
@@ -646,23 +776,27 @@ void transformer_block(float *d_in, float *d_attn_b, float *d_attn_w,
     // layer_norm(d_mha_out_a, d_ln_2_g, d_ln_2_b, seq_len, HIDDEN_DIM, 1e-5);
     batch_layer_norm(d_mha_out_a, d_ln_2_g, d_ln_2_b, batch_size, seq_len, HIDDEN_DIM, 1e-5);
 
-    printf("d_mha_out_a: ");
-    print_device_pointer(d_mha_out_a, 1000);
+    // printf("d_mha_out_a: ");
+    // print_device_pointer(d_mha_out_a, 1000);
     // exit(1);
 
     /* Position-wise Feed-Forward Network */
     ffn(d_mha_out_a, d_mlp1_w, d_mlp1_b, d_mlp2_w, d_mlp2_b, d_out, seq_len, batch_size);
 
-    printf("d_out: ");
-    print_device_pointer(d_out, 1000);
+    // printf("d_out: ");
+    // print_device_pointer(d_out, 1000);
     // exit(1);
 
     /* Add Residual */
     // add(d_out, d_residual_a, seq_len * HIDDEN_DIM);
     batch_add(d_out, d_residual_a, batch_size, seq_len * HIDDEN_DIM);
 
-    printf("d_out: ");
-    print_device_pointer(d_out, 1000);
+    // printf("d_out: ");
+    // print_device_pointer(d_out, 1000);
+    // exit(1);
+
+    // printf("d_out: ");
+    // print_batch_device_pointer(d_out, 1000, 12288);
     // exit(1);
 }
 
@@ -678,6 +812,9 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
     // TODO batch loop 
     for (size_t p = 0; p < n_prompt; p += BATCH_SIZE) {
       int batch_size = MIN(BATCH_SIZE, n_prompt - p);
+      printf("batch_size: %d\n", batch_size);
+      printf("prompt_size: %d\n", tokens_per_prompt);
+      printf("n_token: %d\n", n_token);
       printf("--- Prompts %zu-%zu ---\n", p, p + batch_size);
       int prompt_size = tokens_per_prompt;
 
@@ -705,8 +842,12 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         // token_pos_embedding(d_input_prompt, d_wte, d_wpe, d_embd_a, prompt_size, HIDDEN_DIM);
         batch_token_pos_embedding(d_input_prompt, d_wte, d_wpe, d_embd_a, batch_size, prompt_size, HIDDEN_DIM);
 
-        printf("d_embd_a: ");
-        print_device_pointer(d_embd_a, 1000);
+        // printf("d_embd_a: ");
+        // print_device_pointer(d_embd_a, 12288 + 100);
+
+        // printf("d_embd_a: ");
+        // print_batch_device_pointer(d_embd_a, 1000, 12288);
+        // exit(1);
 
         /* Forward path of Transformer blocks */
         for (size_t l = 0; l < NUM_LAYER; l++) {
@@ -715,8 +856,12 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
                                       d_mlp1_b[l], d_mlp1_w[l], d_mlp2_b[l], d_mlp2_w[l],
                                       d_transformer_block_a, prompt_size, batch_size);
 
-          printf("d_transformer_block_a: ");
-          print_device_pointer(d_transformer_block_a, 100);
+          // printf("d_transformer_block_a: ");
+          // print_device_pointer(d_transformer_block_a, 100);
+          // exit(1);
+
+          // printf("d_transformer_block_a: ");
+          // print_batch_device_pointer(d_transformer_block_a, 1000, 12288);
           // exit(1);
 
           /* Copy output to embd_a for next block */
@@ -728,42 +873,58 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         // layer_norm(d_embd_a, d_ln_f_g, d_ln_f_b, prompt_size, HIDDEN_DIM, 1e-5);
         batch_layer_norm(d_embd_a, d_ln_f_g, d_ln_f_b, batch_size, prompt_size, HIDDEN_DIM, 1e-5);
 
-        printf("d_embd_a: ");
-        print_device_pointer(d_embd_a, 1000);
+        // printf("d_embd_a: ");
+        // print_batch_device_pointer(d_embd_a, 12288, 12288);
         // exit(1);
 
         /* Projection to vocab. dimension */
         transpose(d_wte, d_wte_transposed_a, wte->shape[0], wte->shape[1]);
         // TODO change 
-        printf("wte->shape[0]: %d\n", wte->shape[0]);
-        printf("wte->shape[1]: %d\n", wte->shape[1]);
+        // printf("wte->shape[0]: %d\n", wte->shape[0]);
+        // printf("wte->shape[1]: %d\n", wte->shape[1]);
 
-        printf("d_wte: ");
-        print_device_pointer(d_wte, 1000);
+        // printf("d_wte: ");
+        // print_device_pointer(d_wte, 1000);
         // exit(1);
 
         // batch_transpose(d_wte, d_wte_transposed_a, batch_size, HIDDEN_DIM, wte->shape[0]);
         // batch_transpose(d_wte, d_wte_transposed_a, batch_size, wte->shape[0], wte->shape[1]);
 
-        printf("d_wte_transposed_a: ");
-        print_device_pointer(d_wte_transposed_a, 1000);
+        // printf("d_wte_transposed_a: ");
+        // print_device_pointer(d_wte_transposed_a, 1000);
         // exit(1);
 
-        printf("d_embd_a: ");
-        print_device_pointer(d_embd_a, 1000);
+        // printf("d_embd_a: ");
+        // print_device_pointer(d_embd_a, 1000);
+        // exit(1);
+
+        // printf("d_wte_transposed_a: ");
+        // print_batch_device_pointer(d_wte_transposed_a, 1000, 12288);
         // exit(1);
 
         // TODO change 
         // matmul(d_embd_a, d_wte_transposed_a, d_logit_a, prompt_size, HIDDEN_DIM, wte->shape[0]);
-        batch_matmul(d_embd_a, d_wte_transposed_a, d_logit_a, batch_size, prompt_size, HIDDEN_DIM, wte->shape[0]);
 
-        printf("d_logit_a: ");
-        print_device_pointer(d_logit_a, 1000);
+        // d_embd_a: [prompt_size, HIDDEN_DIM]
+        // d_wte_transposed_a: [HIDDEN_DIM, NUM_VOCAB]
+        // d_logit_a: [prompt_size, NUM_VOCAB]
+        printf("batch_size: %d\n", batch_size);
+        batch_matmul_final(d_embd_a, d_wte_transposed_a, d_logit_a, batch_size, prompt_size, HIDDEN_DIM, wte->shape[0]);
+
+        // printf("d_logit_a: ");
+        // print_device_pointer(d_logit_a, 8);
+        // exit(1);
+
+        // printf("d_logit_a: ");
+        // print_batch_device_pointer(d_logit_a, 1000, 16 * 50257);
         // exit(1);
 
         /* Greedy sampling (only last timestep is considered) */
         // top1_sampling(d_logit_a, d_out, prompt_size, NUM_VOCAB);
         batch_top1_sampling(d_logit_a, d_out, batch_size, prompt_size, NUM_VOCAB);
+
+        // printf("d_out: ");
+        // print_batch_device_pointer(d_out, 1, batch_size);
 
         std::vector<int> next_token_ids(batch_size);
         cudaMemcpy(next_token_ids.data(), d_out, batch_size * sizeof(int), cudaMemcpyDeviceToHost);
@@ -771,11 +932,17 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         for (int i=0; i<batch_size; i++) {
           printf("next_token_id[%d]: %d\n", i, next_token_ids[i]);
         }
-        exit(1);
+        // exit(1);
 
         for (size_t i = 0; i < batch_size; i++) {
-          input_prompt.push_back(next_token_ids[i]);
+          // input_prompt.push_back(next_token_ids[i]);
+
+          size_t insert_position = (i + 1) * prompt_size + i;
+          // size_t insert_position = (i + 1) * prompt_size;
+          input_prompt.insert(input_prompt.begin() + insert_position, next_token_ids[i]);
+          
           output[(p + i) * n_token + t] = next_token_ids[i];
+          // printf("next_token_id[%d]: %d\n", i, next_token_ids[i]);
         }
 
         // printf("before printing\n");
@@ -784,24 +951,24 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         // }
         // printf("next_token_id: %d\n", next_token_id);
 
-        printf("before updating input_prompt\n");
+        // printf("before updating input_prompt\n");
         /* Update input prompt and prompt size */
         // TODO update next token per every prompt 
         // input_prompt.push_back(next_token_id[0]);
-        // prompt_size += 1;
+        prompt_size += 1;
 
-        printf("before writing to output\n");
+        // printf("before writing to output\n");
 
         /* Store generated token to output */
         // TODO store tokens in appropriate positions within each prompt 
         // output[p * n_token + t] = next_token_id[0];
 
       }
-      printf("before free\n");
+      // printf("before free\n");
       cudaFree(d_input_prompt);
       /* Finalize activations */
       free_activations();
-      printf("after free_activations\n");
+      // printf("after free_activations\n");
 
       // TODO cudaFree d_out
     }
