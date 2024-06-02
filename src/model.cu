@@ -6,6 +6,8 @@
 #include "layer.h"
 #include "model.h"
 
+#define BATCH_SIZE 16 
+
 #define CHECK_CUDA(call)                                              \
   do {                                                                \
     cudaError_t status_ = call;                                       \
@@ -226,14 +228,6 @@ void free_parameters() {
   cudaFree(d_wte);
 }
 
-Activation *embd_a, *ffn_proj_a;
-Activation *mha_qkv_proj_a, *mha_out_a, *mha_split_qkv_a, *mha_split_head_a,
-    *mha_mask_a, *mha_merge_head_a, *mha_q_a, *mha_k_a, *mha_v_a,
-    *mha_attn_out_a, *mha_concat_head_a;
-Activation *attn_score_a, *k_transposed_a;
-Activation *wte_transposed_a, *residual_a, *logit_a;
-Activation *transformer_block_a;
-
 float *d_embd_a, *d_ffn_proj_a;
 float *d_mha_qkv_proj_a, *d_mha_out_a, *d_mha_split_qkv_a,
     *d_mha_split_head_a, *d_mha_mask_a, *d_mha_merge_head_a, *d_mha_q_a,
@@ -243,76 +237,29 @@ float *d_wte_transposed_a, *d_residual_a, *d_logit_a;
 float *d_transformer_block_a;
 
 void alloc_activations(size_t prompt_size) {
-  embd_a = new Activation({prompt_size, HIDDEN_DIM});
-
-  ffn_proj_a = new Activation({prompt_size, 4 * HIDDEN_DIM});
-
-  mha_qkv_proj_a = new Activation({prompt_size, 3 * HIDDEN_DIM});
-  mha_out_a = new Activation({prompt_size, HIDDEN_DIM});
-  mha_split_qkv_a = new Activation({3, prompt_size, HIDDEN_DIM});
-  mha_split_head_a =
-      new Activation({3, NUM_HEAD, prompt_size, HIDDEN_DIM / NUM_HEAD});
-  mha_mask_a = new Activation({prompt_size, prompt_size});
-  mha_merge_head_a =
-      new Activation({NUM_HEAD, prompt_size, HIDDEN_DIM / NUM_HEAD});
-  mha_q_a = new Activation({prompt_size, HIDDEN_DIM / NUM_HEAD});
-  mha_k_a = new Activation({prompt_size, HIDDEN_DIM / NUM_HEAD});
-  mha_v_a = new Activation({prompt_size, HIDDEN_DIM / NUM_HEAD});
-  mha_attn_out_a = new Activation({prompt_size, HIDDEN_DIM / NUM_HEAD});
-  mha_concat_head_a = new Activation({prompt_size, HIDDEN_DIM});
-
-  attn_score_a = new Activation({prompt_size, prompt_size});
-  k_transposed_a = new Activation({HIDDEN_DIM / NUM_HEAD, prompt_size});
-
-  wte_transposed_a = new Activation({HIDDEN_DIM, NUM_VOCAB});
-
-  residual_a = new Activation({prompt_size, HIDDEN_DIM});
-  logit_a = new Activation({prompt_size, NUM_VOCAB});
-  transformer_block_a = new Activation({prompt_size, HIDDEN_DIM});
-
   /* Allocate device memory */
-  cudaMalloc(&d_embd_a, embd_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_ffn_proj_a, ffn_proj_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_mha_qkv_proj_a, mha_qkv_proj_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_mha_out_a, mha_out_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_mha_split_qkv_a, mha_split_qkv_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_mha_split_head_a, mha_split_head_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_mha_mask_a, mha_mask_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_mha_merge_head_a, mha_merge_head_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_mha_q_a, mha_q_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_mha_k_a, mha_k_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_mha_v_a, mha_v_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_mha_attn_out_a, mha_attn_out_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_mha_concat_head_a, mha_concat_head_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_attn_score_a, attn_score_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_k_transposed_a, k_transposed_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_wte_transposed_a, wte_transposed_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_residual_a, residual_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_logit_a, logit_a->num_elem() * sizeof(float));
-  cudaMalloc(&d_transformer_block_a, transformer_block_a->num_elem() * sizeof(float));
+  cudaMalloc(&d_embd_a, prompt_size * HIDDEN_DIM * sizeof(float));
+  cudaMalloc(&d_ffn_proj_a, prompt_size * 4 * HIDDEN_DIM * sizeof(float));
+  cudaMalloc(&d_mha_qkv_proj_a, prompt_size * 3 * HIDDEN_DIM * sizeof(float));
+  cudaMalloc(&d_mha_out_a, prompt_size * HIDDEN_DIM * sizeof(float));
+  cudaMalloc(&d_mha_split_qkv_a, 3 * prompt_size * HIDDEN_DIM * sizeof(float));
+  cudaMalloc(&d_mha_split_head_a, 3 * NUM_HEAD * prompt_size * HIDDEN_DIM / NUM_HEAD * sizeof(float));
+  cudaMalloc(&d_mha_mask_a, prompt_size * prompt_size * sizeof(float));
+  cudaMalloc(&d_mha_merge_head_a, NUM_HEAD * prompt_size * HIDDEN_DIM / NUM_HEAD * sizeof(float));
+  cudaMalloc(&d_mha_q_a, prompt_size * HIDDEN_DIM / NUM_HEAD * sizeof(float));
+  cudaMalloc(&d_mha_k_a, prompt_size * HIDDEN_DIM / NUM_HEAD * sizeof(float));
+  cudaMalloc(&d_mha_v_a, prompt_size * HIDDEN_DIM / NUM_HEAD * sizeof(float));
+  cudaMalloc(&d_mha_attn_out_a, prompt_size * HIDDEN_DIM / NUM_HEAD * sizeof(float));
+  cudaMalloc(&d_mha_concat_head_a, prompt_size * HIDDEN_DIM * sizeof(float));
+  cudaMalloc(&d_attn_score_a, prompt_size * prompt_size * sizeof(float));
+  cudaMalloc(&d_k_transposed_a, HIDDEN_DIM / NUM_HEAD * prompt_size * sizeof(float));
+  cudaMalloc(&d_wte_transposed_a, HIDDEN_DIM * NUM_VOCAB * sizeof(float));
+  cudaMalloc(&d_residual_a, prompt_size * HIDDEN_DIM * sizeof(float));
+  cudaMalloc(&d_logit_a, prompt_size * NUM_VOCAB * sizeof(float));
+  cudaMalloc(&d_transformer_block_a, prompt_size * HIDDEN_DIM * sizeof(float));
 }
 
 void free_activations() {
-  delete embd_a;
-  delete ffn_proj_a;
-  delete mha_qkv_proj_a;
-  delete mha_out_a;
-  delete mha_split_qkv_a;
-  delete mha_split_head_a;
-  delete mha_mask_a;
-  delete mha_merge_head_a;
-  delete mha_q_a;
-  delete mha_k_a;
-  delete mha_v_a;
-  delete mha_attn_out_a;
-  delete mha_concat_head_a;
-  delete attn_score_a;
-  delete k_transposed_a;
-  delete wte_transposed_a;
-  delete residual_a;
-  delete logit_a;
-  delete transformer_block_a;
-
   cudaFree(d_embd_a);
   cudaFree(d_ffn_proj_a);
   cudaFree(d_mha_qkv_proj_a);
@@ -742,6 +689,7 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         // exit(1);
 
         /* Projection to vocab. dimension */
+        // TODO change 
         transpose(d_wte, d_wte_transposed_a, wte->shape[0], wte->shape[1]);
         // matmul(embd_a, wte_transposed_a, logit_a);
 
@@ -762,6 +710,7 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         // print_device_pointer(d_logit_a, 1000);
         // exit(1);
 
+        // TODO change 
         matmul(d_embd_a, d_wte_transposed_a, d_logit_a, prompt_size, HIDDEN_DIM, wte->shape[0]);
 
         // printf("d_embd_a: ");
