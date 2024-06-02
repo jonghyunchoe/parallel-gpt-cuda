@@ -779,20 +779,20 @@ __global__ void batch_matmul_kernel_final(float *in1, float *in2, float *out, si
 // }
 
 void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
-    printf("batch_size: %lu, M: %lu, K: %lu, N: %lu\n", (unsigned long)batch_size, (unsigned long)M, (unsigned long)K, (unsigned long)N);
+    // printf("batch_size: %lu, M: %lu, K: %lu, N: %lu\n", (unsigned long)batch_size, (unsigned long)M, (unsigned long)K, (unsigned long)N);
 
     dim3 blockDim(16, 16);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
 
-    printf("gridDim: (%d, %d, %d), blockDim: (%d, %d, %d)\n", gridDim.x, gridDim.y, gridDim.z, blockDim.x, blockDim.y, blockDim.z);
+    // printf("gridDim: (%d, %d, %d), blockDim: (%d, %d, %d)\n", gridDim.x, gridDim.y, gridDim.z, blockDim.x, blockDim.y, blockDim.z);
 
     batch_matmul_kernel_final<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
 
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("CUDA Error: %s\n", cudaGetErrorString(err));
-    }
-    cudaDeviceSynchronize();
+    // cudaError_t err = cudaGetLastError();
+    // if (err != cudaSuccess) {
+    //     printf("CUDA Error: %s\n", cudaGetErrorString(err));
+    // }
+    // cudaDeviceSynchronize();
 }
 
 

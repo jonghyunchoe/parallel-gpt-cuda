@@ -6,7 +6,7 @@
 #include "layer.h"
 #include "model.h"
 
-#define BATCH_SIZE 16 
+#define BATCH_SIZE 512 // 256
 
 #define CHECK_CUDA(call)                                              \
   do {                                                                \
@@ -326,9 +326,6 @@ void alloc_activations(size_t prompt_size) {
   cudaMalloc(&d_k_transposed_a, HIDDEN_DIM / NUM_HEAD * prompt_size * sizeof(float));
   cudaMalloc(&d_wte_transposed_a, HIDDEN_DIM * NUM_VOCAB * sizeof(float));
   cudaMalloc(&d_residual_a, prompt_size * HIDDEN_DIM * sizeof(float));
-  printf("prompt_size: %zu\n", prompt_size);
-  printf("NUM_VOCAB: %d\n", NUM_VOCAB);
-  printf("d_logit_a size: %zu\n", prompt_size * NUM_VOCAB);
   cudaMalloc(&d_logit_a, prompt_size * NUM_VOCAB * sizeof(float));
   cudaMalloc(&d_transformer_block_a, prompt_size * HIDDEN_DIM * sizeof(float));
 }
@@ -812,9 +809,9 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
     // TODO batch loop 
     for (size_t p = 0; p < n_prompt; p += BATCH_SIZE) {
       int batch_size = MIN(BATCH_SIZE, n_prompt - p);
-      printf("batch_size: %d\n", batch_size);
-      printf("prompt_size: %d\n", tokens_per_prompt);
-      printf("n_token: %d\n", n_token);
+      // printf("batch_size: %d\n", batch_size);
+      // printf("prompt_size: %d\n", tokens_per_prompt);
+      // printf("n_token: %d\n", n_token);
       printf("--- Prompts %zu-%zu ---\n", p, p + batch_size);
       int prompt_size = tokens_per_prompt;
 
@@ -908,7 +905,7 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         // d_embd_a: [prompt_size, HIDDEN_DIM]
         // d_wte_transposed_a: [HIDDEN_DIM, NUM_VOCAB]
         // d_logit_a: [prompt_size, NUM_VOCAB]
-        printf("batch_size: %d\n", batch_size);
+        // printf("batch_size: %d\n", batch_size);
         batch_matmul_final(d_embd_a, d_wte_transposed_a, d_logit_a, batch_size, prompt_size, HIDDEN_DIM, wte->shape[0]);
 
         // printf("d_logit_a: ");
@@ -929,9 +926,9 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
         std::vector<int> next_token_ids(batch_size);
         cudaMemcpy(next_token_ids.data(), d_out, batch_size * sizeof(int), cudaMemcpyDeviceToHost);
 
-        for (int i=0; i<batch_size; i++) {
-          printf("next_token_id[%d]: %d\n", i, next_token_ids[i]);
-        }
+        // for (int i=0; i<batch_size; i++) {
+        //   printf("next_token_id[%d]: %d\n", i, next_token_ids[i]);
+        // }
         // exit(1);
 
         for (size_t i = 0; i < batch_size; i++) {
