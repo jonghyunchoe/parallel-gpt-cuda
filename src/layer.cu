@@ -103,13 +103,29 @@ void token_pos_embedding(int *d_in, float *d_wte, float *d_wpe, float *d_out, si
   token_pos_embedding_kernel<<<gridDim, blockDim>>>(d_in, d_wte, d_wpe, d_out, s, H);
   // printf("End\n");
 
-  cudaError_t err = cudaGetLastError();
-  if (err != cudaSuccess) {
-      fprintf(stderr, "Failed to launch token_pos_embedding_kernel (error code %s)!\n", cudaGetErrorString(err));
-      exit(EXIT_FAILURE);
-  }
+  // cudaError_t err = cudaGetLastError();
+  // if (err != cudaSuccess) {
+  //     fprintf(stderr, "Failed to launch token_pos_embedding_kernel (error code %s)!\n", cudaGetErrorString(err));
+  //     exit(EXIT_FAILURE);
+  // }
 }
 
+__global__ void batch_token_pos_embedding_kernel(int *in, float *wte, float *wpe, float *out, size_t batch_size, size_t s, size_t H) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
+    if (idx < batch_size * s * H) {
+        size_t batch_id = idx / (s * H);
+        size_t local_idx = idx % (s * H);
+        size_t i = local_idx / H; 
+        size_t j = local_idx % H; 
+        out[idx] = wte[in[batch_id * s + i] * H + j] + wpe[i * H + j]; 
+    }
+}
+
+void batch_token_pos_embedding(int *d_in, float *d_wte, float *d_wpe, float *d_out, size_t batch_size, size_t s, size_t H) {
+    dim3 blockDim(256); 
+    dim3 gridDim((batch_size * s * H + blockDim.x - 1) / blockDim.x); 
+    batch_token_pos_embedding_kernel<<<gridDim, blockDim>>>(d_in, d_wte, d_wpe, d_out, batch_size, s, H);
+}
 
 /* GELU
  * @param [in & out] inout: [N]
@@ -161,6 +177,22 @@ void gelu(float *d_inout, size_t N) {
     gelu_kernel<<<gridDim, blockDim>>>(d_inout, N);
 }
 
+__global__ void batch_gelu_kernel(float *inout, size_t N) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
+    if (idx < N) {
+        float x = inout[idx]; 
+        inout[idx] = 
+            0.5 * x *
+            (1.f + tanh(sqrt(2.f / MATH_PI) * (x + 0.044715f * x * x * x)));
+    }
+}
+
+void batch_gelu(float *d_inout, size_t batch_size, size_t N) {
+    size_t total_N = batch_size * N;
+    dim3 blockDim(256); 
+    dim3 gridDim((total_N + blockDim.x - 1) / blockDim.x); 
+    batch_gelu_kernel<<<gridDim, blockDim>>>(d_inout, total_N);
+}
 
 /* Softmax (w/ Max Trick)
  * @param [in & out] inout: [s, H]
@@ -231,6 +263,33 @@ void softmax(float *d_inout, size_t s, size_t V) {
     dim3 blockDim(256);
     dim3 gridDim((s + blockDim.x - 1) / blockDim.x);
     softmax_kernel<<<gridDim, blockDim>>>(d_inout, s, V);
+}
+
+__global__ void batch_softmax_kernel(float *inout, size_t batch_size, size_t s, size_t V) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch_size * s) {
+        size_t batch_id = idx / s;
+        size_t token_id = idx % s;
+        float max_val = -INFINITY;
+        for (size_t j = 0; j < V; j++) {
+            max_val = fmaxf(max_val, inout[(batch_id * s + token_id) * V + j]);
+        }
+
+        float sum_exp = 0.0f;
+        for (size_t j = 0; j < V; j++) {
+            sum_exp += expf(inout[(batch_id * s + token_id) * V + j] - max_val);
+        }
+
+        for (size_t j = 0; j < V; j++) {
+            inout[(batch_id * s + token_id) * V + j] = expf(inout[(batch_id * s + token_id) * V + j] - max_val) / sum_exp;
+        }
+    }
+}
+
+void batch_softmax(float *d_inout, size_t batch_size, size_t s, size_t V) {
+    dim3 blockDim(256);
+    dim3 gridDim((batch_size * s + blockDim.x - 1) / blockDim.x);
+    batch_softmax_kernel<<<gridDim, blockDim>>>(d_inout, batch_size, s, V);
 }
 
 /* Layer Normalization
@@ -319,6 +378,33 @@ void layer_norm(float *d_inout, float *d_gamma, float *d_beta, size_t s, size_t 
     layer_norm_kernel<<<gridDim, blockDim>>>(d_inout, d_gamma, d_beta, s, H, eps);
 }
 
+__global__ void batch_layer_norm_kernel(float *inout, float *gamma, float *beta, size_t batch_size, size_t s, size_t H, float eps) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch_size * s) {
+        size_t batch_id = idx / s;
+        size_t token_id = idx % s;
+        float mean = 0;
+        float var = 0;
+
+        for (size_t j = 0; j < H; j++) {
+            mean += inout[(batch_id * s + token_id) * H + j];
+            var += inout[(batch_id * s + token_id) * H + j] * inout[(batch_id * s + token_id) * H + j];
+        }
+        mean /= H;
+        var = var / H - mean * mean;
+
+        for (size_t j = 0; j < H; j++) {
+            inout[(batch_id * s + token_id) * H + j] = (inout[(batch_id * s + token_id) * H + j] - mean) * (1.0 / sqrtf(var + eps)) * gamma[j] + beta[j];
+        }
+    }
+}
+
+void batch_layer_norm(float *d_inout, float *d_gamma, float *d_beta, size_t batch_size, size_t s, size_t H, float eps) {
+    dim3 blockDim(256);
+    dim3 gridDim((batch_size * s + blockDim.x - 1) / blockDim.x);
+    batch_layer_norm_kernel<<<gridDim, blockDim>>>(d_inout, d_gamma, d_beta, batch_size, s, H, eps);
+}
+
 /* Linear
  * @param [in1]  in: [M, K]
  * @param [in2]   w: [K, N]
@@ -391,6 +477,30 @@ void linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t M, size_t 
     dim3 blockDim(16, 16);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y);
     linear_kernel<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, M, K, N);
+}
+
+__global__ void batch_linear_kernel(float *in, float *w, float *b, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch_size * M * N) {
+        size_t batch_id = idx / (M * N);
+        size_t local_idx = idx % (M * N);
+        size_t row = local_idx / N;
+        size_t col = local_idx % N;
+
+        if (row < M && col < N) {
+            float sum = 0;
+            for (size_t k = 0; k < K; k++) {
+                sum += in[batch_id * M * K + row * K + k] * w[k * N + col];
+            }
+            out[batch_id * M * N + row * N + col] = sum + b[col];
+        }
+    }
+}
+
+void batch_linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+    dim3 blockDim(256);
+    dim3 gridDim((batch_size * M * N + blockDim.x - 1) / blockDim.x);
+    batch_linear_kernel<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, batch_size, M, K, N);
 }
 
 /* Matmul
@@ -505,6 +615,55 @@ void matmul(float *d_in1, float *d_in2, float *d_out, size_t M, size_t K, size_t
     matmul_kernel<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N);
 }
 
+__global__ void batch_matmul_kernel(float *A, float *B, float *C, size_t batch_size, size_t M, size_t K, size_t N) {
+    __shared__ float A_shared[TILE_SIZE][TILE_SIZE];
+    __shared__ float B_shared[TILE_SIZE][TILE_SIZE];   
+
+    size_t batch_id = blockIdx.z;
+    int global_row = blockIdx.y * blockDim.y + threadIdx.y;
+    int global_col = blockIdx.x * blockDim.x + threadIdx.x; 
+    int local_row = threadIdx.y;
+    int local_col = threadIdx.x; 
+
+    float sum = 0.0f;
+
+    for (int k = 0; k < (K + TILE_SIZE - 1) / TILE_SIZE; k++) {
+        int A_local_row = global_row * K + k * TILE_SIZE + local_col; 
+        int B_local_col = (k * TILE_SIZE + local_row) * N + global_col; 
+
+        if (global_row < M && k * TILE_SIZE + local_col < K) {
+            A_shared[local_row][local_col] = A[batch_id * M * K + A_local_row];
+        } else {
+            A_shared[local_row][local_col] = 0.0f; 
+        }
+
+        if (global_col < N && k * TILE_SIZE + local_row < K) {
+            B_shared[local_row][local_col] = B[batch_id * K * N + B_local_col];
+        } else {
+            B_shared[local_row][local_col] = 0.0f; 
+        }
+
+        __syncthreads();
+
+        for (int n = 0; n < TILE_SIZE; n++) {
+            sum += A_shared[local_row][n] * B_shared[n][local_col];
+        }
+
+        __syncthreads(); 
+    }
+
+    if (global_row < M && global_col < N) {
+        printf("batch_id: %lu, global_row: %d, global_col: %d sum: %f\n", (unsigned long)batch_id, global_row, global_col, sum);
+        C[batch_id * M * N + global_row * N + global_col] = sum; 
+    }
+}
+
+void batch_matmul(float *d_A, float *d_B, float *d_C, size_t batch_size, size_t M, size_t K, size_t N) {
+    dim3 blockDim(TILE_SIZE, TILE_SIZE);
+    dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
+    batch_matmul_kernel<<<gridDim, blockDim>>>(d_A, d_B, d_C, batch_size, M, K, N);
+}
+
 /* Transpose
  * @param [in1]  in: [M, N]
  * @param [out] out: [N, M]
@@ -555,6 +714,22 @@ void transpose(float *d_in, float *d_out, size_t M, size_t N) {
     transpose_kernel<<<gridDim, blockDim>>>(d_in, d_out, M, N); 
 }
 
+__global__ void batch_transpose_kernel(float *in, float *out, size_t batch_size, size_t M, size_t N) {
+    size_t batch_id = blockIdx.z;
+    size_t row = blockIdx.y * blockDim.y + threadIdx.y; 
+    size_t col = blockIdx.x * blockDim.x + threadIdx.x; 
+
+    if (row < M && col < N) {
+        out[batch_id * N * M + col * M + row] = in[batch_id * M * N + row * N + col];
+    }
+}
+
+void batch_transpose(float *d_in, float *d_out, size_t batch_size, size_t M, size_t N) {
+    dim3 blockDim(16, 16);
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
+    batch_transpose_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, M, N);
+}
+
 /* Scaling
  * @param [in1 & out] inout: [N]
  * @param [in2]       scale: [1]
@@ -596,6 +771,20 @@ void scaling(float *d_inout, float scale, size_t N) {
     dim3 blockDim(256);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
     scaling_kernel<<<gridDim, blockDim>>>(d_inout, scale, N); 
+}
+
+__global__ void batch_scaling_kernel(float *inout, float scale, size_t batch_size, size_t N) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
+
+    if (idx < batch_size * N) {
+        inout[idx] *= scale; 
+    }
+}
+
+void batch_scaling(float *d_inout, float scale, size_t batch_size, size_t N) {
+    dim3 blockDim(256);
+    dim3 gridDim((batch_size * N + blockDim.x - 1) / blockDim.x);
+    batch_scaling_kernel<<<gridDim, blockDim>>>(d_inout, scale, batch_size, N); 
 }
 
 /* Generate mask
@@ -653,6 +842,26 @@ void generate_mask(float *d_inout, size_t s) {
     generate_mask_kernel<<<gridDim, blockDim>>>(d_inout, s);
 }
 
+__global__ void batch_generate_mask_kernel(float *inout, size_t batch_size, size_t s) {
+    size_t batch_id = blockIdx.z;
+    size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+    size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < s && col < s) {
+        if (row >= col) {
+            inout[batch_id * s * s + row * s + col] = 0;
+        } else {
+            inout[batch_id * s * s + row * s + col] = -1e10;
+        }
+    }
+}
+
+void batch_generate_mask(float *d_inout, size_t batch_size, size_t s) {
+    dim3 blockDim(16, 16);
+    dim3 gridDim((s + blockDim.x - 1) / blockDim.x, (s + blockDim.y - 1) / blockDim.y, batch_size);
+    batch_generate_mask_kernel<<<gridDim, blockDim>>>(d_inout, batch_size, s);
+}
+
 /* Copy
  * @param [in1]  in: [N]
  * @param [out] out: [N]
@@ -697,6 +906,20 @@ void copy(float *d_in, float *d_out, size_t N) {
     dim3 blockDim(256);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
     copy_kernel<<<gridDim, blockDim>>>(d_in, d_out, N);
+}
+
+__global__ void batch_copy_kernel(float *in, float *out, size_t batch_size, size_t N) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
+
+    if (idx < batch_size * N) {
+        out[idx] = in[idx];
+    }
+}
+
+void batch_copy(float *d_in, float *d_out, size_t batch_size, size_t N) {
+    dim3 blockDim(256);
+    dim3 gridDim((batch_size * N + blockDim.x - 1) / blockDim.x);
+    batch_copy_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, N);
 }
 
 /* Add
@@ -746,6 +969,19 @@ void add(float *d_inout, float *d_x, size_t N) {
     dim3 blockDim(256);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
     add_kernel<<<gridDim, blockDim>>>(d_inout, d_x, N);
+}
+
+__global__ void batch_add_kernel(float *inout, float *x, size_t batch_size, size_t N) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch_size * N) { 
+        inout[idx] += x[idx]; 
+    }
+}
+
+void batch_add(float *d_inout, float *d_x, size_t batch_size, size_t N) {
+    dim3 blockDim(256);
+    dim3 gridDim((batch_size * N + blockDim.x - 1) / blockDim.x);
+    batch_add_kernel<<<gridDim, blockDim>>>(d_inout, d_x, batch_size, N);
 }
 
 /* Split into QKV
@@ -806,6 +1042,27 @@ void split_qkv(float *d_in, float *d_out, size_t s, size_t H) {
     dim3 blockDim(256);
     dim3 gridDim((s * H + blockDim.x - 1) / blockDim.x);
     split_qkv_kernel<<<gridDim, blockDim>>>(d_in, d_out, s, H, s * H);
+}
+
+__global__ void batch_split_qkv_kernel(float *in, float *out, size_t batch_size, size_t s, size_t H, size_t N) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < batch_size * N) {
+        size_t batch_id = idx / N;
+        size_t local_idx = idx % N;
+        size_t i = local_idx / (s * (H / 3));
+        size_t j = (local_idx % (s * (H / 3))) / (H / 3);
+        size_t k = local_idx % (H / 3);
+
+        out[idx] = in[batch_id * s * H + i * (H / 3) + j * H + k];
+    }
+}
+
+void batch_split_qkv(float *d_in, float *d_out, size_t batch_size, size_t s, size_t H) {
+    size_t N = 3 * s * (H / 3);
+    dim3 blockDim(256);
+    dim3 gridDim((batch_size * N + blockDim.x - 1) / blockDim.x);
+    batch_split_qkv_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, s, H, N);
 }
 
 /* Split into heads
@@ -873,6 +1130,28 @@ void split_head(float *d_in, float *d_out, size_t n_head, size_t s, size_t H) {
     dim3 blockDim(256);
     dim3 gridDim((3 * s * H + blockDim.x - 1) / blockDim.x);
     split_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, n_head, s, H, 3 * s * H);
+}
+
+__global__ void batch_split_head_kernel(float *in, float *out, size_t batch_size, size_t n_head, size_t s, size_t H, size_t N) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < batch_size * N) {
+        size_t batch_id = idx / N;
+        size_t local_idx = idx % N;
+        size_t i = local_idx / (n_head * s * (H / n_head));
+        size_t j = (local_idx % (n_head * s * (H / n_head))) / (s * (H / n_head));
+        size_t k = (local_idx % (s * (H / n_head))) / (H / n_head);
+        size_t l = local_idx % (H / n_head);
+
+        out[idx] = in[batch_id * 3 * s * H + i * s * H + k * H + j * (H / n_head) + l];
+    }
+}
+
+void batch_split_head(float *d_in, float *d_out, size_t batch_size, size_t n_head, size_t s, size_t H) {
+    size_t N = 3 * n_head * s * (H / n_head);
+    dim3 blockDim(256);
+    dim3 gridDim((batch_size * N + blockDim.x - 1) / blockDim.x);
+    batch_split_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, n_head, s, H, N);
 }
 
 /* Extract Q, K, V from QKV head
@@ -953,6 +1232,28 @@ void extract_qkv(float *d_in, float *d_q, float *d_k, float *d_v, size_t head_id
     extract_qkv_kernel<<<gridDim, blockDim>>>(d_in, head_idx, n_head, d_q, d_k, d_v, s, H_, s * H_);
 }
 
+__global__ void batch_extract_qkv_kernel(float *in, size_t head_idx, size_t n_head, float *q, float *k, float *v, size_t batch_size, size_t s, size_t H_, size_t N) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < batch_size * N) {
+        size_t batch_id = idx / N;
+        size_t local_idx = idx % N;
+        size_t i = local_idx / H_;
+        size_t j = local_idx % H_;
+
+        q[batch_id * s * H_ + i * H_ + j] = in[batch_id * 3 * n_head * s * H_ + 0 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
+        k[batch_id * s * H_ + i * H_ + j] = in[batch_id * 3 * n_head * s * H_ + 1 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
+        v[batch_id * s * H_ + i * H_ + j] = in[batch_id * 3 * n_head * s * H_ + 2 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
+    }
+}
+
+void batch_extract_qkv(float *d_in, float *d_q, float *d_k, float *d_v, size_t batch_size, size_t head_idx, size_t n_head, size_t s, size_t H_) {
+    size_t N = s * H_;
+    dim3 blockDim(256);
+    dim3 gridDim((batch_size * N + blockDim.x - 1) / blockDim.x);
+    batch_extract_qkv_kernel<<<gridDim, blockDim>>>(d_in, head_idx, n_head, d_q, d_k, d_v, batch_size, s, H_, N);
+}
+
 /* Merge each heads
  * @param [in1]       in: [s, H_]
  * @param [in2] head_idx: [1]
@@ -1010,6 +1311,25 @@ void merge_head(float *d_in, float *d_out, size_t head_idx, size_t s, size_t H_)
     dim3 blockDim(256);
     dim3 gridDim((s * H_ + blockDim.x - 1) / blockDim.x);
     merge_head_kernel<<<gridDim, blockDim>>>(d_in, head_idx, s, H_, d_out);
+}
+
+__global__ void batch_merge_head_kernel(float *in, size_t head_idx, size_t n_head, size_t batch_size, size_t s, size_t H_, float *out) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < batch_size * s * H_) {
+        size_t batch_id = idx / (s * H_);
+        size_t local_idx = idx % (s * H_);
+        size_t i = local_idx / H_;
+        size_t j = local_idx % H_;
+
+        out[batch_id * n_head * s * H_ + head_idx * s * H_ + i * H_ + j] = in[idx];
+    }
+}
+
+void batch_merge_head(float *d_in, float *d_out, size_t batch_size, size_t n_head, size_t head_idx, size_t s, size_t H_) {
+    dim3 blockDim(256);
+    dim3 gridDim((batch_size * s * H_ + blockDim.x - 1) / blockDim.x);
+    batch_merge_head_kernel<<<gridDim, blockDim>>>(d_in, head_idx, n_head, batch_size, s, H_, d_out);
 }
 
 /* Concatenate each heads
@@ -1072,6 +1392,26 @@ void concat_head(float *d_in, float *d_out, size_t n_head, size_t s, size_t H_) 
     dim3 blockDim(256);
     dim3 gridDim((n_head * s * H_ + blockDim.x - 1) / blockDim.x);
     concat_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, n_head, s, H_);
+}
+
+__global__ void batch_concat_head_kernel(float *in, float *out, size_t batch_size, size_t n_head, size_t s, size_t H_) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
+
+    if (idx < batch_size * s * H_ * n_head) {
+        size_t batch_id = idx / (s * H_ * n_head);
+        size_t local_idx = idx % (s * H_ * n_head);
+        size_t i = (local_idx % (s * H_)) / H_; 
+        size_t j = local_idx / (s * H_); 
+        size_t k = local_idx % H_; 
+
+        out[batch_id * s * H_ * n_head + i * n_head * H_ + j * H_ + k] = in[batch_id * n_head * s * H_ + j * s * H_ + i * H_ + k];
+    }
+}
+
+void batch_concat_head(float *d_in, float *d_out, size_t batch_size, size_t n_head, size_t s, size_t H_) {
+    dim3 blockDim(256);
+    dim3 gridDim((batch_size * n_head * s * H_ + blockDim.x - 1) / blockDim.x);
+    batch_concat_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, n_head, s, H_);
 }
 
 /* Greedy Max Sampling
@@ -1140,3 +1480,25 @@ void top1_sampling(float *d_in, int *d_out, size_t s, size_t V) {
   top1_sampling_kernel<<<1, 1>>>(d_in + (s - 1) * V, d_out, V);
 }
 
+__global__ void batch_top1_sampling_kernel(float *in, int *out, size_t batch_size, size_t s, size_t V) {
+    size_t batch_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (batch_id < batch_size) {
+        float max_val = -INFINITY;
+        int max_idx = 0;
+
+        for (size_t i = 0; i < V; i++) {
+            if (in[batch_id * s * V + (s - 1) * V + i] > max_val) {
+                max_val = in[batch_id * s * V + (s - 1) * V + i];
+                max_idx = i;
+            }
+        }
+        
+        out[batch_id] = max_idx;
+    }
+}
+
+void batch_top1_sampling(float *d_in, int *d_out, size_t batch_size, size_t s, size_t V) {
+    dim3 blockDim(256);
+    dim3 gridDim((batch_size + blockDim.x - 1) / blockDim.x);
+    batch_top1_sampling_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, s, V);
+}
