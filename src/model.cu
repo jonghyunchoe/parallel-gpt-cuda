@@ -6,7 +6,7 @@
 #include "layer.h"
 #include "model.h"
 
-#define BATCH_SIZE 512 // 256
+#define BATCH_SIZE 512
 
 #define CHECK_CUDA(call)                                              \
   do {                                                                \
@@ -817,9 +817,7 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
 
       /* Initialize input prompt */
       vector<int> input_prompt(batch_size * prompt_size);
-      // TODO check location 
-      memcpy(input_prompt.data(), input + batch_size * p * prompt_size,
-             batch_size * prompt_size * sizeof(int));
+      memcpy(input_prompt.data(), input + p * prompt_size, batch_size * prompt_size * sizeof(int));
 
       // Temporary 
       int *d_input_prompt; 
