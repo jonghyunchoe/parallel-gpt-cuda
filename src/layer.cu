@@ -497,11 +497,57 @@ __global__ void batch_linear_kernel(float *in, float *w, float *b, float *out, s
     }
 }
 
-void batch_linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
-    dim3 blockDim(256);
-    dim3 gridDim((batch_size * M * N + blockDim.x - 1) / blockDim.x);
-    batch_linear_kernel<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, batch_size, M, K, N);
+// void batch_linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+//     dim3 blockDim(256);
+//     dim3 gridDim((batch_size * M * N + blockDim.x - 1) / blockDim.x);
+//     batch_linear_kernel<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, batch_size, M, K, N);
+// }
+
+#define LARGE_DIM 128
+#define SMALL_DIM 32
+
+__global__ void batch_linear_kernel_v2(float *in, float *w, float *b, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
+    __shared__ float in_shared[SMALL_DIM][SMALL_DIM];
+    __shared__ float w_shared[SMALL_DIM][SMALL_DIM];
+
+    float sum = 0.0f;
+    size_t batch_id = blockIdx.z;
+    size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+    size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    for (size_t m = 0; m < (K + SMALL_DIM - 1) / SMALL_DIM; ++m) {
+        if (row < M && m * SMALL_DIM + threadIdx.x < K) {
+            in_shared[threadIdx.y][threadIdx.x] = in[batch_id * M * K + row * K + m * SMALL_DIM + threadIdx.x];
+        } else {
+            in_shared[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        if (m * SMALL_DIM + threadIdx.y < K && col < N) {
+            w_shared[threadIdx.y][threadIdx.x] = w[(m * SMALL_DIM + threadIdx.y) * N + col];
+        } else {
+            w_shared[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        __syncthreads();
+
+        for (size_t k = 0; k < SMALL_DIM; ++k) {
+            sum += in_shared[threadIdx.y][k] * w_shared[k][threadIdx.x];
+        }
+
+        __syncthreads();
+    }
+
+    if (row < M && col < N) {
+        out[batch_id * M * N + row * N + col] = sum + b[col];
+    }
 }
+
+void batch_linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+    dim3 blockDim(SMALL_DIM, SMALL_DIM);
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
+    batch_linear_kernel_v2<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, batch_size, M, K, N);
+}
+
 
 /* Matmul
  * @param [in1]  in1: [M, K]
