@@ -2,7 +2,7 @@
 #include <cstdio>
 #include <cmath>
 
-#define TILE_SIZE 32 
+#define TILE_SIZE 32
 
 /* Linear
  * @param [in1]  in: [M, K]
@@ -96,34 +96,31 @@ __global__ void batch_linear_kernel_v1(float *in, float *w, float *b, float *out
     }
 }
 
-#define LARGE_DIM 128
-#define SMALL_DIM 32
-
 __global__ void batch_linear_kernel_v2(float *in, float *w, float *b, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
-    __shared__ float in_shared[SMALL_DIM][SMALL_DIM];
-    __shared__ float w_shared[SMALL_DIM][SMALL_DIM];
+    __shared__ float in_shared[TILE_SIZE][TILE_SIZE];
+    __shared__ float w_shared[TILE_SIZE][TILE_SIZE];
 
     float sum = 0.0f;
     size_t batch_id = blockIdx.z;
     size_t row = blockIdx.y * blockDim.y + threadIdx.y;
     size_t col = blockIdx.x * blockDim.x + threadIdx.x;
 
-    for (size_t m = 0; m < (K + SMALL_DIM - 1) / SMALL_DIM; ++m) {
-        if (row < M && m * SMALL_DIM + threadIdx.x < K) {
-            in_shared[threadIdx.y][threadIdx.x] = in[batch_id * M * K + row * K + m * SMALL_DIM + threadIdx.x];
+    for (size_t m = 0; m < (K + TILE_SIZE - 1) / TILE_SIZE; ++m) {
+        if (row < M && m * TILE_SIZE + threadIdx.x < K) {
+            in_shared[threadIdx.y][threadIdx.x] = in[batch_id * M * K + row * K + m * TILE_SIZE + threadIdx.x];
         } else {
             in_shared[threadIdx.y][threadIdx.x] = 0.0f;
         }
 
-        if (m * SMALL_DIM + threadIdx.y < K && col < N) {
-            w_shared[threadIdx.y][threadIdx.x] = w[(m * SMALL_DIM + threadIdx.y) * N + col];
+        if (m * TILE_SIZE + threadIdx.y < K && col < N) {
+            w_shared[threadIdx.y][threadIdx.x] = w[(m * TILE_SIZE + threadIdx.y) * N + col];
         } else {
             w_shared[threadIdx.y][threadIdx.x] = 0.0f;
         }
 
         __syncthreads();
 
-        for (size_t k = 0; k < SMALL_DIM; ++k) {
+        for (size_t k = 0; k < TILE_SIZE; ++k) {
             sum += in_shared[threadIdx.y][k] * w_shared[k][threadIdx.x];
         }
 
@@ -136,7 +133,7 @@ __global__ void batch_linear_kernel_v2(float *in, float *w, float *b, float *out
 }
 
 void batch_linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
-    dim3 blockDim(SMALL_DIM, SMALL_DIM);
+    dim3 blockDim(TILE_SIZE, TILE_SIZE);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
     batch_linear_kernel_v2<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, batch_size, M, K, N);
 }
@@ -289,34 +286,32 @@ __global__ void batch_matmul_kernel_v1(float *in1, float *in2, float *out, size_
     }
 }
 
-#define TILE_DIM 32
-
 __global__ void batch_matmul_kernel_v2(float *in1, float *in2, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
-    __shared__ float tile_in1[TILE_DIM][TILE_DIM];
-    __shared__ float tile_in2[TILE_DIM][TILE_DIM];
+    __shared__ float tile_in1[TILE_SIZE][TILE_SIZE];
+    __shared__ float tile_in2[TILE_SIZE][TILE_SIZE];
 
-    size_t row = blockIdx.y * TILE_DIM + threadIdx.y;
-    size_t col = blockIdx.x * TILE_DIM + threadIdx.x;
+    size_t row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    size_t col = blockIdx.x * TILE_SIZE + threadIdx.x;
     size_t batch_id = blockIdx.z;
 
     float sum = 0.0f;
 
-    for (size_t t = 0; t < (K + TILE_DIM - 1) / TILE_DIM; ++t) {
-        if (row < M && t * TILE_DIM + threadIdx.x < K) {
-            tile_in1[threadIdx.y][threadIdx.x] = in1[batch_id * M * K + row * K + t * TILE_DIM + threadIdx.x];
+    for (size_t t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
+        if (row < M && t * TILE_SIZE + threadIdx.x < K) {
+            tile_in1[threadIdx.y][threadIdx.x] = in1[batch_id * M * K + row * K + t * TILE_SIZE + threadIdx.x];
         } else {
             tile_in1[threadIdx.y][threadIdx.x] = 0.0f;
         }
 
-        if (col < N && t * TILE_DIM + threadIdx.y < K) {
-            tile_in2[threadIdx.y][threadIdx.x] = in2[(t * TILE_DIM + threadIdx.y) * N + col];
+        if (col < N && t * TILE_SIZE + threadIdx.y < K) {
+            tile_in2[threadIdx.y][threadIdx.x] = in2[(t * TILE_SIZE + threadIdx.y) * N + col];
         } else {
             tile_in2[threadIdx.y][threadIdx.x] = 0.0f;
         }
 
         __syncthreads();
 
-        for (size_t k = 0; k < TILE_DIM; ++k) {
+        for (size_t k = 0; k < TILE_SIZE; ++k) {
             sum += tile_in1[threadIdx.y][k] * tile_in2[k][threadIdx.x];
         }
 
@@ -330,8 +325,8 @@ __global__ void batch_matmul_kernel_v2(float *in1, float *in2, float *out, size_
 
 
 void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
-    dim3 blockDim(TILE_DIM, TILE_DIM);
-    dim3 gridDim((N + TILE_DIM - 1) / TILE_DIM, (M + TILE_DIM - 1) / TILE_DIM, batch_size);
+    dim3 blockDim(TILE_SIZE, TILE_SIZE);
+    dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
 
     batch_matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
 }
