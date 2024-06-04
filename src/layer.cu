@@ -824,22 +824,64 @@ __global__ void batch_matmul_kernel_final(float *in1, float *in2, float *out, si
 //     cudaDeviceSynchronize();  // Ensure all kernels complete before proceeding
 // }
 
-void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
-    // printf("batch_size: %lu, M: %lu, K: %lu, N: %lu\n", (unsigned long)batch_size, (unsigned long)M, (unsigned long)K, (unsigned long)N);
+// void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+//     // printf("batch_size: %lu, M: %lu, K: %lu, N: %lu\n", (unsigned long)batch_size, (unsigned long)M, (unsigned long)K, (unsigned long)N);
 
-    dim3 blockDim(16, 16);
-    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
+//     dim3 blockDim(16, 16);
+//     dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
 
-    // printf("gridDim: (%d, %d, %d), blockDim: (%d, %d, %d)\n", gridDim.x, gridDim.y, gridDim.z, blockDim.x, blockDim.y, blockDim.z);
+//     // printf("gridDim: (%d, %d, %d), blockDim: (%d, %d, %d)\n", gridDim.x, gridDim.y, gridDim.z, blockDim.x, blockDim.y, blockDim.z);
 
-    batch_matmul_kernel_final<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
+//     batch_matmul_kernel_final<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
+// }
 
-    // cudaError_t err = cudaGetLastError();
-    // if (err != cudaSuccess) {
-    //     printf("CUDA Error: %s\n", cudaGetErrorString(err));
-    // }
-    // cudaDeviceSynchronize();
+#define TILE_DIM 32
+
+__global__ void batch_matmul_kernel_v2(float *in1, float *in2, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
+    __shared__ float tile_in1[TILE_DIM][TILE_DIM];
+    __shared__ float tile_in2[TILE_DIM][TILE_DIM];
+
+    size_t row = blockIdx.y * TILE_DIM + threadIdx.y;
+    size_t col = blockIdx.x * TILE_DIM + threadIdx.x;
+    size_t batch_id = blockIdx.z;
+
+    float sum = 0.0f;
+
+    for (size_t t = 0; t < (K + TILE_DIM - 1) / TILE_DIM; ++t) {
+        if (row < M && t * TILE_DIM + threadIdx.x < K) {
+            tile_in1[threadIdx.y][threadIdx.x] = in1[batch_id * M * K + row * K + t * TILE_DIM + threadIdx.x];
+        } else {
+            tile_in1[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        if (col < N && t * TILE_DIM + threadIdx.y < K) {
+            tile_in2[threadIdx.y][threadIdx.x] = in2[(t * TILE_DIM + threadIdx.y) * N + col];
+        } else {
+            tile_in2[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        __syncthreads();
+
+        for (size_t k = 0; k < TILE_DIM; ++k) {
+            sum += tile_in1[threadIdx.y][k] * tile_in2[k][threadIdx.x];
+        }
+
+        __syncthreads();
+    }
+
+    if (row < M && col < N) {
+        out[batch_id * M * N + row * N + col] = sum;
+    }
 }
+
+
+void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+    dim3 blockDim(TILE_DIM, TILE_DIM);
+    dim3 gridDim((N + TILE_DIM - 1) / TILE_DIM, (M + TILE_DIM - 1) / TILE_DIM, batch_size);
+
+    batch_matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
+}
+
 
 
 /* Transpose
