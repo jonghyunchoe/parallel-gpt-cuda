@@ -170,46 +170,6 @@ void alloc_and_set_parameters(float *param) {
   pos += OFFSET7;
   wte = new Parameter({NUM_VOCAB, HIDDEN_DIM}, param + pos);
   pos += OFFSET8;
-
-  // /* Allocate device memory */
-  // for (int i = 0; i < NUM_LAYER; i++) {
-  //   cudaMalloc(&d_attn_b[order[i]], attn_b[order[i]]->num_elem() * sizeof(float));
-  //   cudaMalloc(&d_attn_w[order[i]], attn_w[order[i]]->num_elem() * sizeof(float));
-  //   cudaMalloc(&d_proj_b[order[i]], proj_b[order[i]]->num_elem() * sizeof(float));
-  //   cudaMalloc(&d_proj_w[order[i]], proj_w[order[i]]->num_elem() * sizeof(float));
-  //   cudaMalloc(&d_ln_1_b[order[i]], ln_1_b[order[i]]->num_elem() * sizeof(float));
-  //   cudaMalloc(&d_ln_1_g[order[i]], ln_1_g[order[i]]->num_elem() * sizeof(float));
-  //   cudaMalloc(&d_ln_2_b[order[i]], ln_2_b[order[i]]->num_elem() * sizeof(float));
-  //   cudaMalloc(&d_ln_2_g[order[i]], ln_2_g[order[i]]->num_elem() * sizeof(float));
-  //   cudaMalloc(&d_mlp1_b[order[i]], mlp1_b[order[i]]->num_elem() * sizeof(float));
-  //   cudaMalloc(&d_mlp1_w[order[i]], mlp1_w[order[i]]->num_elem() * sizeof(float));
-  //   cudaMalloc(&d_mlp2_b[order[i]], mlp2_b[order[i]]->num_elem() * sizeof(float));
-  //   cudaMalloc(&d_mlp2_w[order[i]], mlp2_w[order[i]]->num_elem() * sizeof(float));
-  // }
-  // cudaMalloc(&d_ln_f_b, ln_f_b->num_elem() * sizeof(float));
-  // cudaMalloc(&d_ln_f_g, ln_f_g->num_elem() * sizeof(float));
-  // cudaMalloc(&d_wpe, wpe->num_elem() * sizeof(float));
-  // cudaMalloc(&d_wte, wte->num_elem() * sizeof(float));
-  
-  // /* Copy data to device */
-  // for (int i = 0; i < NUM_LAYER; i++) {
-  //   cudaMemcpy(d_attn_b[order[i]], attn_b[order[i]]->buf, attn_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  //   cudaMemcpy(d_attn_w[order[i]], attn_w[order[i]]->buf, attn_w[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  //   cudaMemcpy(d_proj_b[order[i]], proj_b[order[i]]->buf, proj_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  //   cudaMemcpy(d_proj_w[order[i]], proj_w[order[i]]->buf, proj_w[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  //   cudaMemcpy(d_ln_1_b[order[i]], ln_1_b[order[i]]->buf, ln_1_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  //   cudaMemcpy(d_ln_1_g[order[i]], ln_1_g[order[i]]->buf, ln_1_g[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  //   cudaMemcpy(d_ln_2_b[order[i]], ln_2_b[order[i]]->buf, ln_2_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  //   cudaMemcpy(d_ln_2_g[order[i]], ln_2_g[order[i]]->buf, ln_2_g[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  //   cudaMemcpy(d_mlp1_b[order[i]], mlp1_b[order[i]]->buf, mlp1_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  //   cudaMemcpy(d_mlp1_w[order[i]], mlp1_w[order[i]]->buf, mlp1_w[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  //   cudaMemcpy(d_mlp2_b[order[i]], mlp2_b[order[i]]->buf, mlp2_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  //   cudaMemcpy(d_mlp2_w[order[i]], mlp2_w[order[i]]->buf, mlp2_w[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  // }
-  // cudaMemcpy(d_ln_f_b, ln_f_b->buf, ln_f_b->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  // cudaMemcpy(d_ln_f_g, ln_f_g->buf, ln_f_g->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  // cudaMemcpy(d_wpe, wpe->buf, wpe->num_elem() * sizeof(float), cudaMemcpyHostToDevice); 
-  // cudaMemcpy(d_wte, wte->buf, wte->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
 }
 
 void alloc_and_set_device_parameters() {
@@ -360,31 +320,15 @@ void free_activations() {
  * @param [in5] mlp2_b: [HIDDEN_DIM]
  * @param [out]    out: [seq_len, HIDDEN_DIM]
  */
-// void ffn(Activation *in, Parameter *mlp1_w, Parameter *mlp1_b,
-//          Parameter *mlp2_w, Parameter *mlp2_b, Activation *out) {
-//   /* Projection Up:
-//     [seq_len, HIDDEN_DIM] -> [seq_len, 4*HIDDEN_DIM] */
-//   linear(in, mlp1_w, mlp1_b, ffn_proj_a);
-
-//   /* GELU */
-//   gelu(ffn_proj_a);
-
-//   /* Projection Down:
-//     [seq_len, 4*HIDDEN_DIM] -> [seq_len, HIDDEN_DIM] */
-//   linear(ffn_proj_a, mlp2_w, mlp2_b, out);
-// }
 void ffn(float *d_in, float *d_mlp1_w, float *d_mlp1_b,
          float *d_mlp2_w, float *d_mlp2_b, float *d_out, size_t seq_len, size_t batch_size) {
     /* Projection Up: [seq_len, HIDDEN_DIM] -> [seq_len, 4*HIDDEN_DIM] */
-    // linear(d_in, d_mlp1_w, d_mlp1_b, d_ffn_proj_a, seq_len, HIDDEN_DIM, 4 * HIDDEN_DIM);
     batch_linear(d_in, d_mlp1_w, d_mlp1_b, d_ffn_proj_a, batch_size, seq_len, HIDDEN_DIM, 4 * HIDDEN_DIM);
 
     /* GELU */
-    // gelu(d_ffn_proj_a, seq_len * 4 * HIDDEN_DIM);
     batch_gelu(d_ffn_proj_a, batch_size, seq_len * 4 * HIDDEN_DIM);
 
     /* Projection Down: [seq_len, 4*HIDDEN_DIM] -> [seq_len, HIDDEN_DIM] */
-    // linear(d_ffn_proj_a, d_mlp2_w, d_mlp2_b, d_out, seq_len, 4 * HIDDEN_DIM, HIDDEN_DIM);
     batch_linear(d_ffn_proj_a, d_mlp2_w, d_mlp2_b, d_out, batch_size, seq_len, 4 * HIDDEN_DIM, HIDDEN_DIM);
 }
 
@@ -395,24 +339,6 @@ void ffn(float *d_in, float *d_mlp1_w, float *d_mlp1_b,
  * @param [in4] mask: [seq_len, HIDDEN_DIM/NUM_HEAD]
  * @param [out]  out: [seq_len, HIDDEN_DIM/NUM_HEAD]
  */
-// void attention(Activation *q, Activation *k, Activation *v, Activation *mask,
-//                Activation *out) {
-//   /* Get Attention score by q @ k */
-//   transpose(k, k_transposed_a);
-//   matmul(q, k_transposed_a, attn_score_a);
-
-//   /* Scaling */
-//   scaling(attn_score_a, (1.0 / sqrt(k->shape[1])));
-
-//   /* Masking */
-//   add(attn_score_a, mask);
-
-//   /* Softmax */
-//   softmax(attn_score_a);
-
-//   /* Attention score @ v */
-//   matmul(attn_score_a, v, out);
-// }
 void attention(float *d_q, float *d_k, float *d_v, float *d_mask, float *d_out, size_t seq_len, size_t head_dim, size_t batch_size) {
     /* Get Attention score by q @ k */
     batch_transpose(d_k, d_k_transposed_a, batch_size, seq_len, head_dim);
@@ -431,80 +357,30 @@ void attention(float *d_q, float *d_k, float *d_v, float *d_mask, float *d_out, 
  * @param [in5] proj_w: [HIDDEN_DIM, HIDDEN_DIM]
  * @param [out]    out: [seq_len, HIDDEN_DIM]
  */
-// void mha(Activation *in, Parameter *attn_b, Parameter *attn_w,
-//          Parameter *proj_b, Parameter *proj_w, Activation *out) {
-//   /* QKV projection:
-//     [seq_len, HIDDEN_DIM] ->
-//     [seq_len, 3*HIDDEN_DIM] */
-//   linear(in, attn_w, attn_b, mha_qkv_proj_a);
-
-//   /* Split into Q, K, V:
-//     [seq_len, 3*HIDDEN_DIM] ->
-//     [3, seq_len, HIDDEN_DIM] */
-//   split_qkv(mha_qkv_proj_a, mha_split_qkv_a);
-
-//   /* Split into multiple heads:
-//     [3, seq_len, HIDDEN_DIM] ->
-//     [3, NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] */
-//   split_head(mha_split_qkv_a, NUM_HEAD, mha_split_head_a);
-
-//   /* Generate mask to hide future inputs */
-//   generate_mask(mha_mask_a);
-
-//   /* Perform Attention over each head:
-//     [NUM_HEAD, 3, seq_len, HIDDEN_DIM/NUM_HEAD] ->
-//     [NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] */
-//   for (size_t idx = 0; idx < NUM_HEAD; idx++) {
-//     /* Extract Q, K, V from qkv_head */
-//     extract_qkv(mha_split_head_a, idx, NUM_HEAD, mha_q_a, mha_k_a, mha_v_a);
-
-//     /* Attention */
-//     attention(mha_q_a, mha_k_a, mha_v_a, mha_mask_a, mha_attn_out_a);
-
-//     /* Merge each head's attn output
-//       [seq_len, HIDDEN_DIM/NUM_HEAD] ->
-//       [NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] */
-//     merge_head(mha_attn_out_a, idx, NUM_HEAD, mha_merge_head_a);
-//   }
-
-//   /* Concat each heads:
-//     [NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] ->
-//     [seq_len, HIDDEN_DIM] */
-//   concat_head(mha_merge_head_a, mha_concat_head_a);
-
-//   /* OUT projection:
-//     [seq_len, HIDDEN_DIM] -> [seq_len, HIDDEN_DIM] */
-//   linear(mha_concat_head_a, proj_w, proj_b, out);
-// }
 void mha(float *d_in, float *d_attn_b, float *d_attn_w,
          float *d_proj_b, float *d_proj_w, float *d_out, size_t seq_len, size_t batch_size) {
     /* QKV projection: [seq_len, HIDDEN_DIM] -> [seq_len, 3*HIDDEN_DIM] */
     batch_linear(d_in, d_attn_w, d_attn_b, d_mha_qkv_proj_a, batch_size, seq_len, HIDDEN_DIM, 3 * HIDDEN_DIM);
     batch_split_qkv(d_mha_qkv_proj_a, d_mha_split_qkv_a, batch_size, seq_len, 3 * HIDDEN_DIM);
-    batch_split_head(d_mha_split_qkv_a, d_mha_split_head_a, batch_size, NUM_HEAD, seq_len, HIDDEN_DIM); // / NUM_HEAD);
+    batch_split_head(d_mha_split_qkv_a, d_mha_split_head_a, batch_size, NUM_HEAD, seq_len, HIDDEN_DIM);
     batch_generate_mask(d_mha_mask_a, batch_size, seq_len);
 
     /* Perform Attention over each head: [NUM_HEAD, 3, seq_len, HIDDEN_DIM/NUM_HEAD] -> [NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] */
     for (size_t idx = 0; idx < NUM_HEAD; idx++) {
         /* Extract Q, K, V from qkv_head */
-        // extract_qkv(d_mha_split_head_a, d_mha_q_a, d_mha_k_a, d_mha_v_a, idx, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
         batch_extract_qkv(d_mha_split_head_a, d_mha_q_a, d_mha_k_a, d_mha_v_a, batch_size, idx, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
 
         /* Attention */
-        // TODO change
         attention(d_mha_q_a, d_mha_k_a, d_mha_v_a, d_mha_mask_a, d_mha_attn_out_a, seq_len, HIDDEN_DIM / NUM_HEAD, batch_size);
 
         /* Merge each head's attn output [seq_len, HIDDEN_DIM/NUM_HEAD] -> [NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] */
-        // merge_head(d_mha_attn_out_a, d_mha_merge_head_a, idx, seq_len, HIDDEN_DIM / NUM_HEAD);
         batch_merge_head(d_mha_attn_out_a, d_mha_merge_head_a, batch_size, NUM_HEAD, idx, seq_len, HIDDEN_DIM / NUM_HEAD);
     }
 
     /* Concat each heads: [NUM_HEAD, seq_len, HIDDEN_DIM/NUM_HEAD] -> [seq_len, HIDDEN_DIM] */
-    // concat_head(d_mha_merge_head_a, d_mha_concat_head_a, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
     batch_concat_head(d_mha_merge_head_a, d_mha_concat_head_a, batch_size, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
 
     /* OUT projection: [seq_len, HIDDEN_DIM] -> [seq_len, HIDDEN_DIM] */
-    // linear(d_mha_concat_head_a, d_proj_w, d_proj_b, d_out, seq_len, HIDDEN_DIM, HIDDEN_DIM);
     batch_linear(d_mha_concat_head_a, d_proj_w, d_proj_b, d_out, batch_size, seq_len, HIDDEN_DIM, HIDDEN_DIM);
 }
 
@@ -525,35 +401,6 @@ void mha(float *d_in, float *d_attn_b, float *d_attn_w,
  * @param [in13] mlp2_w: [4*HIDDEN_DIM, HIDDEN_DIM]
  * @param [out]     out: [seq_len, HIDDEN_DIM]
  */
-// void transformer_block(Activation *in, Parameter *attn_b, Parameter *attn_w,
-//                        Parameter *proj_b, Parameter *proj_w, Parameter *ln_1_b,
-//                        Parameter *ln_1_g, Parameter *ln_2_b, Parameter *ln_2_g,
-//                        Parameter *mlp1_b, Parameter *mlp1_w, Parameter *mlp2_b,
-//                        Parameter *mlp2_w, Activation *out) {
-//   /* Copy Residual */
-//   copy(in, residual_a);
-
-//   /* Layer Normalization */
-//   layer_norm(in, ln_1_g, ln_1_b);
-
-//   /* Masked Multi-Head Self-Attention */
-//   mha(in, attn_b, attn_w, proj_b, proj_w, mha_out_a);
-
-//   /* Add Residual */
-//   add(mha_out_a, residual_a);
-
-//   /* Copy Residual */
-//   copy(mha_out_a, residual_a);
-
-//   /* Layer Normalization */
-//   layer_norm(mha_out_a, ln_2_g, ln_2_b);
-
-//   /* Position-wise Feed-Forward Network */
-//   ffn(mha_out_a, mlp1_w, mlp1_b, mlp2_w, mlp2_b, out);
-
-//   /* Add Residual */
-//   add(out, residual_a);
-// }
 void transformer_block(float *d_in, float *d_attn_b, float *d_attn_w,
                        float *d_proj_b, float *d_proj_w, float *d_ln_1_b,
                        float *d_ln_1_g, float *d_ln_2_b, float *d_ln_2_g,
@@ -564,26 +411,21 @@ void transformer_block(float *d_in, float *d_attn_b, float *d_attn_w,
     batch_layer_norm(d_in, d_ln_1_g, d_ln_1_b, batch_size, seq_len, HIDDEN_DIM, 1e-5);
 
     /* Masked Multi-Head Self-Attention */
-    // mha(d_in, d_attn_b, d_attn_w, d_proj_b, d_proj_w, d_mha_out_a, seq_len);
     mha(d_in, d_attn_b, d_attn_w, d_proj_b, d_proj_w, d_mha_out_a, seq_len, batch_size);
 
     /* Add Residual */
-    // add(d_mha_out_a, d_residual_a, seq_len * HIDDEN_DIM);
     batch_add(d_mha_out_a, d_residual_a, batch_size, seq_len * HIDDEN_DIM);
 
     /* Copy Residual */
-    // copy(d_mha_out_a, d_residual_a, seq_len * HIDDEN_DIM);
     batch_copy(d_mha_out_a, d_residual_a, batch_size, seq_len * HIDDEN_DIM);
 
     /* Layer Normalization */
-    // layer_norm(d_mha_out_a, d_ln_2_g, d_ln_2_b, seq_len, HIDDEN_DIM, 1e-5);
     batch_layer_norm(d_mha_out_a, d_ln_2_g, d_ln_2_b, batch_size, seq_len, HIDDEN_DIM, 1e-5);
 
     /* Position-wise Feed-Forward Network */
     ffn(d_mha_out_a, d_mlp1_w, d_mlp1_b, d_mlp2_w, d_mlp2_b, d_out, seq_len, batch_size);
 
     /* Add Residual */
-    // add(d_out, d_residual_a, seq_len * HIDDEN_DIM);
     batch_add(d_out, d_residual_a, batch_size, seq_len * HIDDEN_DIM);
 }
 
@@ -616,10 +458,9 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
     /* Outer loop: generate tokens for each prompt */
     for (size_t p = start_prompt; p < end_prompt; p += BATCH_SIZE) {
         int batch_size = MIN(BATCH_SIZE, end_prompt - p);
-        // if (mpi_rank == 0) {
-        // printf("mpi_rank: %d | Prompts %zu-%zu\n", mpi_rank, p, p + batch_size);
-        // }
         int prompt_size = tokens_per_prompt;
+
+        printf("mpi_rank: %d | Prompts %zu-%zu\n", mpi_rank, p, p + batch_size);
 
         /* Initialize input prompt */
         std::vector<int> input_prompt(batch_size * prompt_size);

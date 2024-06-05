@@ -96,9 +96,9 @@ __global__ void batch_linear_kernel_v1(float *in, float *w, float *b, float *out
     }
 }
 
-__global__ void batch_linear_kernel_v2(float *in, float *w, float *b, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
-    __shared__ float in_shared[TILE_SIZE][TILE_SIZE];
-    __shared__ float w_shared[TILE_SIZE][TILE_SIZE];
+__global__ void batch_linear_kernel_v2(float *A, float *B, float *C, float *D, size_t batch_size, size_t M, size_t K, size_t N) {
+    __shared__ float A_shared[TILE_SIZE][TILE_SIZE];
+    __shared__ float B_shared[TILE_SIZE][TILE_SIZE];
 
     float sum = 0.0f;
     size_t batch_id = blockIdx.z;
@@ -107,28 +107,28 @@ __global__ void batch_linear_kernel_v2(float *in, float *w, float *b, float *out
 
     for (size_t m = 0; m < (K + TILE_SIZE - 1) / TILE_SIZE; ++m) {
         if (row < M && m * TILE_SIZE + threadIdx.x < K) {
-            in_shared[threadIdx.y][threadIdx.x] = in[batch_id * M * K + row * K + m * TILE_SIZE + threadIdx.x];
+            A_shared[threadIdx.y][threadIdx.x] = A[batch_id * M * K + row * K + m * TILE_SIZE + threadIdx.x];
         } else {
-            in_shared[threadIdx.y][threadIdx.x] = 0.0f;
+            A_shared[threadIdx.y][threadIdx.x] = 0.0f;
         }
 
         if (m * TILE_SIZE + threadIdx.y < K && col < N) {
-            w_shared[threadIdx.y][threadIdx.x] = w[(m * TILE_SIZE + threadIdx.y) * N + col];
+            B_shared[threadIdx.y][threadIdx.x] = B[(m * TILE_SIZE + threadIdx.y) * N + col];
         } else {
-            w_shared[threadIdx.y][threadIdx.x] = 0.0f;
+            B_shared[threadIdx.y][threadIdx.x] = 0.0f;
         }
 
         __syncthreads();
 
         for (size_t k = 0; k < TILE_SIZE; ++k) {
-            sum += in_shared[threadIdx.y][k] * w_shared[k][threadIdx.x];
+            sum += A_shared[threadIdx.y][k] * B_shared[k][threadIdx.x];
         }
 
         __syncthreads();
     }
 
     if (row < M && col < N) {
-        out[batch_id * M * N + row * N + col] = sum + b[col];
+        D[batch_id * M * N + row * N + col] = sum + C[col];
     }
 }
 
