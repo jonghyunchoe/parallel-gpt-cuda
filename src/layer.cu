@@ -1298,7 +1298,7 @@ void top1_sampling(float *d_in, int *d_out, size_t s, size_t V) {
   top1_sampling_kernel<<<1, 1>>>(d_in + (s - 1) * V, d_out, V);
 }
 
-__global__ void batch_top1_sampling_kernel(float *in, int *out, size_t batch_size, size_t s, size_t V) {
+__global__ void batch_top1_sampling_kernel(float *in, int *out, size_t batch_size, size_t n_token, size_t position, size_t s, size_t V) {
     size_t batch_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (batch_id < batch_size) {
         float max_val = -INFINITY;
@@ -1311,12 +1311,14 @@ __global__ void batch_top1_sampling_kernel(float *in, int *out, size_t batch_siz
             }
         }
         
-        out[batch_id] = max_idx;
+        // out[batch_id + position] = max_idx;
+        out[batch_id * n_token + position] = max_idx;
+        // where position is nth token 
     }
 }
 
-void batch_top1_sampling(float *d_in, int *d_out, size_t batch_size, size_t s, size_t V) {
+void batch_top1_sampling(float *d_in, int *d_out, size_t batch_size, size_t n_token, size_t position, size_t s, size_t V) {
     dim3 blockDim(256);
     dim3 gridDim((batch_size + blockDim.x - 1) / blockDim.x);
-    batch_top1_sampling_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, s, V);
+    batch_top1_sampling_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, n_token, position, s, V);
 }
