@@ -286,40 +286,44 @@ __global__ void batch_matmul_kernel_v1(float *in1, float *in2, float *out, size_
     }
 }
 
-__global__ void batch_matmul_kernel_v2(float *in1, float *in2, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
-    __shared__ float tile_in1[TILE_SIZE][TILE_SIZE];
-    __shared__ float tile_in2[TILE_SIZE][TILE_SIZE];
+__global__ void batch_matmul_kernel_v2(float *A, float *B, float *C, size_t batch_size, size_t M, size_t K, size_t N) {
+    __shared__ float A_shared[TILE_SIZE][TILE_SIZE];
+    __shared__ float B_shared[TILE_SIZE][TILE_SIZE];
 
-    size_t row = blockIdx.y * TILE_SIZE + threadIdx.y;
-    size_t col = blockIdx.x * TILE_SIZE + threadIdx.x;
     size_t batch_id = blockIdx.z;
+    size_t global_row = blockIdx.y * blockDim.y + threadIdx.y;
+    size_t global_col = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t local_row = threadIdx.y;
+    size_t local_col = threadIdx.x;
 
     float sum = 0.0f;
 
     for (size_t t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
-        if (row < M && t * TILE_SIZE + threadIdx.x < K) {
-            tile_in1[threadIdx.y][threadIdx.x] = in1[batch_id * M * K + row * K + t * TILE_SIZE + threadIdx.x];
+        int A_local_row = batch_id * M * K + global_row * K + t * TILE_SIZE + local_col;
+        int B_local_col = (t * TILE_SIZE + local_row) * N + global_col;
+        if (global_row < M && t * TILE_SIZE + local_col < K) {
+            A_shared[local_row][local_col] = A[A_local_row];
         } else {
-            tile_in1[threadIdx.y][threadIdx.x] = 0.0f;
+            A_shared[local_row][local_col] = 0.0f; 
         }
 
-        if (col < N && t * TILE_SIZE + threadIdx.y < K) {
-            tile_in2[threadIdx.y][threadIdx.x] = in2[(t * TILE_SIZE + threadIdx.y) * N + col];
+        if (global_col < N && t * TILE_SIZE + local_row < K) {
+            B_shared[local_row][local_col] = B[B_local_col];
         } else {
-            tile_in2[threadIdx.y][threadIdx.x] = 0.0f;
+            B_shared[local_row][local_col] = 0.0f; 
         }
 
         __syncthreads();
 
         for (size_t k = 0; k < TILE_SIZE; ++k) {
-            sum += tile_in1[threadIdx.y][k] * tile_in2[k][threadIdx.x];
+            sum += A_shared[local_row][k] * B_shared[k][local_col];
         }
 
         __syncthreads();
     }
 
-    if (row < M && col < N) {
-        out[batch_id * M * N + row * N + col] = sum;
+    if (global_row < M && global_col < N) {
+        C[batch_id * M * N + global_row * N + global_col] = sum;
     }
 }
 
