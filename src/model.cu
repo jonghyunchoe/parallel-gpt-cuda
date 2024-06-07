@@ -72,47 +72,6 @@ float *d_mlp2_b[NUM_LAYER][NGPU], *d_mlp2_w[NUM_LAYER][NGPU];
 float *d_ln_f_b[NGPU], *d_ln_f_g[NGPU];
 float *d_wpe[NGPU], *d_wte[NGPU];
 
-void alloc_and_set_parameters(float *param) {
-  size_t pos = 0;
-  int order[] = {
-      0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9,
-  };
-  for (int i = 0; i < NUM_LAYER; i++) {
-    attn_b[order[i]] = new Parameter({3 * HIDDEN_DIM}, param + pos);
-    pos += OFFSET1;
-    attn_w[order[i]] = new Parameter({HIDDEN_DIM, 3 * HIDDEN_DIM}, param + pos);
-    pos += OFFSET2;
-    proj_b[order[i]] = new Parameter({HIDDEN_DIM}, param + pos);
-    pos += OFFSET3;
-    proj_w[order[i]] = new Parameter({HIDDEN_DIM, HIDDEN_DIM}, param + pos);
-    pos += OFFSET4;
-    ln_1_b[order[i]] = new Parameter({HIDDEN_DIM}, param + pos);
-    pos += OFFSET3;
-    ln_1_g[order[i]] = new Parameter({HIDDEN_DIM}, param + pos);
-    pos += OFFSET3;
-    ln_2_b[order[i]] = new Parameter({HIDDEN_DIM}, param + pos);
-    pos += OFFSET3;
-    ln_2_g[order[i]] = new Parameter({HIDDEN_DIM}, param + pos);
-    pos += OFFSET3;
-    mlp1_b[order[i]] = new Parameter({4 * HIDDEN_DIM}, param + pos);
-    pos += OFFSET5;
-    mlp1_w[order[i]] = new Parameter({HIDDEN_DIM, 4 * HIDDEN_DIM}, param + pos);
-    pos += OFFSET6;
-    mlp2_b[order[i]] = new Parameter({HIDDEN_DIM}, param + pos);
-    pos += OFFSET3;
-    mlp2_w[order[i]] = new Parameter({4 * HIDDEN_DIM, HIDDEN_DIM}, param + pos);
-    pos += OFFSET6;
-  }
-  ln_f_b = new Parameter({HIDDEN_DIM}, param + pos);
-  pos += OFFSET3;
-  ln_f_g = new Parameter({HIDDEN_DIM}, param + pos);
-  pos += OFFSET3;
-  wpe = new Parameter({MAX_SEQ_LEN, HIDDEN_DIM}, param + pos);
-  pos += OFFSET7;
-  wte = new Parameter({NUM_VOCAB, HIDDEN_DIM}, param + pos);
-  pos += OFFSET8;
-}
-
 void alloc_and_set_device_parameters() {
   int order[] = {
       0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9,
@@ -160,6 +119,49 @@ void alloc_and_set_device_parameters() {
     cudaMemcpy(d_wpe[gpu_id], wpe->buf, wpe->num_elem() * sizeof(float), cudaMemcpyHostToDevice); 
     cudaMemcpy(d_wte[gpu_id], wte->buf, wte->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
   }
+}
+
+void alloc_and_set_parameters(float *param) {
+  size_t pos = 0;
+  int order[] = {
+      0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9,
+  };
+  for (int i = 0; i < NUM_LAYER; i++) {
+    attn_b[order[i]] = new Parameter({3 * HIDDEN_DIM}, param + pos);
+    pos += OFFSET1;
+    attn_w[order[i]] = new Parameter({HIDDEN_DIM, 3 * HIDDEN_DIM}, param + pos);
+    pos += OFFSET2;
+    proj_b[order[i]] = new Parameter({HIDDEN_DIM}, param + pos);
+    pos += OFFSET3;
+    proj_w[order[i]] = new Parameter({HIDDEN_DIM, HIDDEN_DIM}, param + pos);
+    pos += OFFSET4;
+    ln_1_b[order[i]] = new Parameter({HIDDEN_DIM}, param + pos);
+    pos += OFFSET3;
+    ln_1_g[order[i]] = new Parameter({HIDDEN_DIM}, param + pos);
+    pos += OFFSET3;
+    ln_2_b[order[i]] = new Parameter({HIDDEN_DIM}, param + pos);
+    pos += OFFSET3;
+    ln_2_g[order[i]] = new Parameter({HIDDEN_DIM}, param + pos);
+    pos += OFFSET3;
+    mlp1_b[order[i]] = new Parameter({4 * HIDDEN_DIM}, param + pos);
+    pos += OFFSET5;
+    mlp1_w[order[i]] = new Parameter({HIDDEN_DIM, 4 * HIDDEN_DIM}, param + pos);
+    pos += OFFSET6;
+    mlp2_b[order[i]] = new Parameter({HIDDEN_DIM}, param + pos);
+    pos += OFFSET3;
+    mlp2_w[order[i]] = new Parameter({4 * HIDDEN_DIM, HIDDEN_DIM}, param + pos);
+    pos += OFFSET6;
+  }
+  ln_f_b = new Parameter({HIDDEN_DIM}, param + pos);
+  pos += OFFSET3;
+  ln_f_g = new Parameter({HIDDEN_DIM}, param + pos);
+  pos += OFFSET3;
+  wpe = new Parameter({MAX_SEQ_LEN, HIDDEN_DIM}, param + pos);
+  pos += OFFSET7;
+  wte = new Parameter({NUM_VOCAB, HIDDEN_DIM}, param + pos);
+  pos += OFFSET8;
+
+  alloc_and_set_device_parameters();
 }
 
 void free_parameters() {
@@ -368,7 +370,7 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
     size_t start_prompt = mpi_rank * prompts_per_node;
     size_t end_prompt = MIN(start_prompt + prompts_per_node, n_prompt);
 
-    alloc_and_set_device_parameters();
+    // alloc_and_set_device_parameters();
 
     for (size_t p = start_prompt; p < end_prompt; p += BATCH_SIZE) {
         int batch_size = MIN(BATCH_SIZE, end_prompt - p);
