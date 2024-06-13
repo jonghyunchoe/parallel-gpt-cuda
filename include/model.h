@@ -29,3 +29,4 @@ static size_t tokens_per_prompt = 16;
 void alloc_and_set_parameters(float *param);
 void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token);
 void free_parameters();
+void print_device_pointer(float* d_ptr, size_t N, int gpu_id);

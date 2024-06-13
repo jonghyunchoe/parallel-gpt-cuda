@@ -302,16 +302,6 @@ void transformer_block(float *d_in, float *d_attn_b, float *d_attn_w,
     batch_add(d_out, d_residual_a[gpu_id], batch_size, seq_len * HIDDEN_DIM);
 }
 
-// __global__ void insert_tokens_kernel(int *d_out, int *d_input_prompt, int prompt_size, int batch_size, int position, int t) {
-//     // TODO space apart input_prompt 
-//     // 두번째 input_prompt는 모두 한칸 뒤로 옮기고, 세번째 input_prompt는 두칸 뒤로 옮기는 방식 
-
-//     for (int i = 0; i < batch_size; i++) {
-//         int insert_position = (i + 1) * prompt_size + i + t;
-//         d_input_prompt[insert_position] = d_out[i + position];
-//     }
-// }
-
 __global__ void insert_tokens_kernel(int *d_out, int *d_input_prompt, int *d_buffer, int prompt_size, int n_token, int batch_size, int position, int total_size) {
     // TODO update 
     // int total_size = batch_size * (prompt_size + batch_size);
@@ -322,7 +312,6 @@ __global__ void insert_tokens_kernel(int *d_out, int *d_input_prompt, int *d_buf
     // temp device pointer should be for ngpus 
     // *d_buffer[ngpu] would work
 
-    
     // int *temp = new int[total_size];
 
     for (int i = 0; i < batch_size; i++) {
@@ -369,8 +358,6 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
     size_t prompts_per_node = (n_prompt + mpi_size - 1) / mpi_size;
     size_t start_prompt = mpi_rank * prompts_per_node;
     size_t end_prompt = MIN(start_prompt + prompts_per_node, n_prompt);
-
-    // alloc_and_set_device_parameters();
 
     for (size_t p = start_prompt; p < end_prompt; p += BATCH_SIZE) {
         int batch_size = MIN(BATCH_SIZE, end_prompt - p);
@@ -442,23 +429,6 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
                 // print_device_pointer(d_input_prompt[gpu_id], gpu_batch_size * (prompt_size + t + 1), gpu_id, "d_input_prompt after inserting tokens");
             }
 
-            // TODO remove 
-            // std::vector<int> next_token_ids(batch_size);
-            // for (int gpu_id = 0; gpu_id < NGPU; gpu_id++) {
-            //     size_t start_idx = gpu_id * (batch_size / NGPU);
-            //     size_t end_idx = (gpu_id == NGPU - 1) ? batch_size : (gpu_id + 1) * (batch_size / NGPU);
-            //     size_t gpu_batch_size = end_idx - start_idx;
-
-            //     CHECK_CUDA(cudaMemcpy(next_token_ids.data() + start_idx, d_out[gpu_id], gpu_batch_size * sizeof(int), cudaMemcpyDeviceToHost));
-            // }
-
-            // for (size_t i = 0; i < batch_size; i++) {
-            //     size_t insert_position = (i + 1) * prompt_size + i;
-            //     input_prompt.insert(input_prompt.begin() + insert_position, next_token_ids[i]);
-            //     output[(p + i) * n_token + t] = next_token_ids[i];
-            // }
-
-
             prompt_size += 1;
             // if (t == 4)
             //   exit(1);
@@ -507,19 +477,19 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
     }
 
     // Print output
-    // if (mpi_rank == 0) {
-    //     for (size_t i = 0; i < n_prompt; i++) {
-    //         printf("Prompt %zu: ", i);
-    //         for (size_t j = 0; j < tokens_per_prompt; j++) {
-    //             printf("%d ", input[i * tokens_per_prompt + j]);
-    //         }
-    //         printf("\n");
+    if (mpi_rank == 0) {
+        for (size_t i = 0; i < 8; i++) {
+            printf("Prompt %zu: ", i);
+            for (size_t j = 0; j < tokens_per_prompt; j++) {
+                printf("%d ", input[i * tokens_per_prompt + j]);
+            }
+            printf("\n");
 
-    //         printf("Output %zu: ", i);
-    //         for (size_t j = 0; j < n_token; j++) {
-    //             printf("%d ", output[i * n_token + j]);
-    //         }
-    //         printf("\n");
-    //     }
-    // }
+            printf("Output %zu: ", i);
+            for (size_t j = 0; j < n_token; j++) {
+                printf("%d ", output[i * n_token + j]);
+            }
+            printf("\n");
+        }
+    }
 }

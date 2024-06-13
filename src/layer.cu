@@ -1,8 +1,207 @@
 #include "layer.h"
 #include <cstdio>
 #include <cmath>
+#include <iostream>
+#include "model.h"
 
 #define TILE_SIZE 32
+
+/* Matmul
+ * @param [in1]  in1: [M, K]
+ * @param [in2]  in2: [K, N]
+ * @param [out]  out: [M, N]
+ */
+// void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
+//   size_t M = in1->shape[0];
+//   size_t K = in1->shape[1];
+//   size_t N = in2->shape[1];
+
+// #pragma omp parallel for
+//   for (size_t i = 0; i < M; i++) {
+//     for (size_t j = 0; j < N; j++) {
+//       out->buf[i * N + j] = 0;
+//       for (size_t k = 0; k < K; k++) {
+//         out->buf[i * N + j] += in1->buf[i * K + k] * in2->buf[k * N + j];
+//       }
+//     }
+//   }
+// }
+
+__global__ void matmul_kernel_v1(float *in1, float *in2, float *out, size_t M, size_t K, size_t N) {
+  size_t row = blockIdx.y * blockDim.y + threadIdx.y; 
+  size_t col = blockIdx.x * blockDim.x + threadIdx.x; 
+  
+  if (row < M && col < N) {
+    float sum = 0;
+    for (size_t k = 0; k < K; k++) {
+      sum += in1[row * K + k] * in2[k * N + col];
+    }
+    out[row * N + col] = sum; 
+  }
+}
+
+__global__ void matmul_kernel_v2(float *A, float *B, float *C, size_t M, size_t K, size_t N) {
+  __shared__ float A_shared[TILE_SIZE][TILE_SIZE];
+  __shared__ float B_shared[TILE_SIZE][TILE_SIZE];   
+
+  int global_row = blockIdx.y * blockDim.y + threadIdx.y;
+  int global_col = blockIdx.x * blockDim.x + threadIdx.x; 
+  int local_row = threadIdx.y;
+  int local_col = threadIdx.x; 
+
+  float sum = 0.0f;
+
+  for (int k = 0; k < (K + TILE_SIZE - 1) / TILE_SIZE; k++) {
+    int A_local_row = global_row * K + k * TILE_SIZE + local_col; 
+    int B_local_col = (k * TILE_SIZE + local_row) * N + global_col; 
+    
+    if (global_row < M && k * TILE_SIZE + local_col < K) {
+      A_shared[local_row][local_col] = A[A_local_row];
+    } else {
+      A_shared[local_row][local_col] = 0.0f; 
+    }
+
+    if (global_col < N && k * TILE_SIZE + local_row < K) {
+      B_shared[local_row][local_col] = B[B_local_col];
+    } else {
+      B_shared[local_row][local_col] = 0.0f; 
+    }
+
+    __syncthreads();
+
+    for (int n = 0; n < TILE_SIZE; n++) {
+      sum += A_shared[local_row][n] * B_shared[n][local_col];
+    }
+
+    __syncthreads(); 
+  }
+
+  if (global_row < M && global_col < N) {
+    C[global_row * N + global_col] = sum; 
+  }
+}
+
+
+void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
+  size_t M = in1->shape[0]; 
+  size_t K = in1->shape[1]; 
+  size_t N = in2->shape[1]; 
+
+  // printf("M: %lu, K: %lu, N: %lu\n", (unsigned long)M, (unsigned long)K, (unsigned long)N);
+
+  float *d_in1; 
+  float *d_in2; 
+  float *d_out; 
+
+  cudaMalloc(&d_in1, M * K * sizeof(float)); 
+  cudaMalloc(&d_in2, K * N * sizeof(float)); 
+  cudaMalloc(&d_out, M * N * sizeof(float)); 
+
+  cudaMemcpy(d_in1, in1->buf, M * K * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_in2, in2->buf, K * N * sizeof(float), cudaMemcpyHostToDevice); 
+
+  dim3 blockDim(TILE_SIZE, TILE_SIZE);
+  dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
+  
+  matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N); 
+
+  cudaMemcpy(out->buf, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost); 
+
+  cudaFree(d_in1);
+  cudaFree(d_in2);
+  cudaFree(d_out);
+}
+
+void matmul(float *d_in1, float *d_in2, float *d_out, size_t M, size_t K, size_t N) {
+    dim3 blockDim(TILE_SIZE, TILE_SIZE);
+    dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
+    matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N);
+}
+
+__global__ void batch_matmul_kernel(float *in1, float *in2, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t idy = blockIdx.y * blockDim.y + threadIdx.y;
+
+    size_t batch_id = blockIdx.z;
+
+    if (idx < N && idy < M) {
+        float sum = 0;
+        for (size_t k = 0; k < K; k++) {
+            sum += in1[batch_id * M * K + idy * K + k] * in2[batch_id * K * N + k * N + idx];
+        }
+        out[batch_id * M * N + idy * N + idx] = sum;
+    }
+}
+
+void batch_matmul(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+    // printf("batch_size: %lu, M: %lu, K: %lu, N: %lu\n", (unsigned long)batch_size, (unsigned long)M, (unsigned long)K, (unsigned long)N);
+    dim3 blockDim(16, 16); 
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size); 
+    batch_matmul_kernel<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
+}
+
+__global__ void batch_matmul_kernel_v1(float *in1, float *in2, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t idy = blockIdx.y * blockDim.y + threadIdx.y;
+    size_t batch_id = blockIdx.z;
+
+    if (idx < N && idy < M) {
+        float sum = 0;
+        for (size_t k = 0; k < K; k++) {
+            sum += in1[batch_id * M * K + idy * K + k] * in2[k * N + idx];
+        }
+        out[batch_id * M * N + idy * N + idx] = sum;
+    }
+}
+
+__global__ void batch_matmul_kernel_v2(float *A, float *B, float *C, size_t batch_size, size_t M, size_t K, size_t N) {
+    __shared__ float A_shared[TILE_SIZE][TILE_SIZE];
+    __shared__ float B_shared[TILE_SIZE][TILE_SIZE];
+
+    size_t batch_id = blockIdx.z;
+    size_t global_row = blockIdx.y * blockDim.y + threadIdx.y;
+    size_t global_col = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t local_row = threadIdx.y;
+    size_t local_col = threadIdx.x;
+
+    float sum = 0.0f;
+
+    for (size_t k = 0; k < (K + TILE_SIZE - 1) / TILE_SIZE; k++) {
+        int A_local_row = batch_id * M * K + global_row * K + k * TILE_SIZE + local_col;
+        int B_local_col = (k * TILE_SIZE + local_row) * N + global_col;
+        
+        if (global_row < M && k * TILE_SIZE + local_col < K) {
+            A_shared[local_row][local_col] = A[A_local_row];
+        } else {
+            A_shared[local_row][local_col] = 0.0f; 
+        }
+
+        if (global_col < N && k * TILE_SIZE + local_row < K) {
+            B_shared[local_row][local_col] = B[B_local_col];
+        } else {
+            B_shared[local_row][local_col] = 0.0f; 
+        }
+
+        __syncthreads();
+
+        for (size_t k = 0; k < TILE_SIZE; k++) {
+            sum += A_shared[local_row][k] * B_shared[k][local_col];
+        }
+
+        __syncthreads();
+    }
+
+    if (global_row < M && global_col < N) {
+        C[batch_id * M * N + global_row * N + global_col] = sum;
+    }
+}
+
+void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+    dim3 blockDim(TILE_SIZE, TILE_SIZE);
+    dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
+
+    batch_matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
+}
 
 /* Linear
  * @param [in1]  in: [M, K]
@@ -132,207 +331,39 @@ __global__ void batch_linear_kernel_v2(float *A, float *B, float *C, float *D, s
     }
 }
 
+__global__ void add_bias_kernel(float *D, float *C, size_t batch_size, size_t M, size_t N) {
+    size_t batch_id = blockIdx.z;
+    size_t row = blockIdx.y * blockDim.y + threadIdx.y;
+    size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < M && col < N) {
+        D[batch_id * M * N + row * N + col] += C[col];
+    }
+}
+
+// void batch_linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+//     dim3 blockDim(TILE_SIZE, TILE_SIZE);
+//     dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
+//     batch_linear_kernel_v2<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, batch_size, M, K, N);
+// }
+
+int count = 0;
+
 void batch_linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
     dim3 blockDim(TILE_SIZE, TILE_SIZE);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
-    batch_linear_kernel_v2<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, batch_size, M, K, N);
-}
 
+    batch_matmul_kernel_v2<<<gridDim, blockDim>>>(d_in, d_w, d_out, batch_size, M, K, N);
 
-/* Matmul
- * @param [in1]  in1: [M, K]
- * @param [in2]  in2: [K, N]
- * @param [out]  out: [M, N]
- */
-// void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
-//   size_t M = in1->shape[0];
-//   size_t K = in1->shape[1];
-//   size_t N = in2->shape[1];
-
-// #pragma omp parallel for
-//   for (size_t i = 0; i < M; i++) {
-//     for (size_t j = 0; j < N; j++) {
-//       out->buf[i * N + j] = 0;
-//       for (size_t k = 0; k < K; k++) {
-//         out->buf[i * N + j] += in1->buf[i * K + k] * in2->buf[k * N + j];
-//       }
-//     }
-//   }
-// }
-
-__global__ void matmul_kernel_v1(float *in1, float *in2, float *out, size_t M, size_t K, size_t N) {
-  size_t row = blockIdx.y * blockDim.y + threadIdx.y; 
-  size_t col = blockIdx.x * blockDim.x + threadIdx.x; 
-  
-  if (row < M && col < N) {
-    float sum = 0;
-    for (size_t k = 0; k < K; k++) {
-      sum += in1[row * K + k] * in2[k * N + col];
-    }
-    out[row * N + col] = sum; 
-  }
-}
-
-__global__ void matmul_kernel_v2(float *A, float *B, float *C, size_t M, size_t K, size_t N) {
-  __shared__ float A_shared[TILE_SIZE][TILE_SIZE];
-  __shared__ float B_shared[TILE_SIZE][TILE_SIZE];   
-
-  int global_row = blockIdx.y * blockDim.y + threadIdx.y;
-  int global_col = blockIdx.x * blockDim.x + threadIdx.x; 
-  int local_row = threadIdx.y;
-  int local_col = threadIdx.x; 
-
-  float sum = 0.0f;
-
-  for (int k = 0; k < (K + TILE_SIZE - 1) / TILE_SIZE; k++) {
-    int A_local_row = global_row * K + k * TILE_SIZE + local_col; 
-    int B_local_col = (k * TILE_SIZE + local_row) * N + global_col; 
-    
-    if (global_row < M && k * TILE_SIZE + local_col < K) {
-      A_shared[local_row][local_col] = A[A_local_row];
-    } else {
-      A_shared[local_row][local_col] = 0.0f; 
-    }
-
-    if (global_col < N && k * TILE_SIZE + local_row < K) {
-      B_shared[local_row][local_col] = B[B_local_col];
-    } else {
-      B_shared[local_row][local_col] = 0.0f; 
-    }
-
-    __syncthreads();
-
-    for (int n = 0; n < TILE_SIZE; n++) {
-      sum += A_shared[local_row][n] * B_shared[n][local_col];
-    }
-
-    __syncthreads(); 
-  }
-
-  if (global_row < M && global_col < N) {
-    C[global_row * N + global_col] = sum; 
-  }
-}
-
-void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
-  size_t M = in1->shape[0]; 
-  size_t K = in1->shape[1]; 
-  size_t N = in2->shape[1]; 
-
-  // printf("M: %lu, K: %lu, N: %lu\n", (unsigned long)M, (unsigned long)K, (unsigned long)N);
-
-  float *d_in1; 
-  float *d_in2; 
-  float *d_out; 
-
-  cudaMalloc(&d_in1, M * K * sizeof(float)); 
-  cudaMalloc(&d_in2, K * N * sizeof(float)); 
-  cudaMalloc(&d_out, M * N * sizeof(float)); 
-
-  cudaMemcpy(d_in1, in1->buf, M * K * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_in2, in2->buf, K * N * sizeof(float), cudaMemcpyHostToDevice); 
-
-  dim3 blockDim(TILE_SIZE, TILE_SIZE);
-  dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
-  
-  matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N); 
-
-  cudaMemcpy(out->buf, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost); 
-
-  cudaFree(d_in1);
-  cudaFree(d_in2);
-  cudaFree(d_out);
-}
-
-void matmul(float *d_in1, float *d_in2, float *d_out, size_t M, size_t K, size_t N) {
-    dim3 blockDim(TILE_SIZE, TILE_SIZE);
-    dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
-    matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N);
-}
-
-__global__ void batch_matmul_kernel(float *in1, float *in2, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t idy = blockIdx.y * blockDim.y + threadIdx.y;
-
-    size_t batch_id = blockIdx.z;
-
-    if (idx < N && idy < M) {
-        float sum = 0;
-        for (size_t k = 0; k < K; k++) {
-            sum += in1[batch_id * M * K + idy * K + k] * in2[batch_id * K * N + k * N + idx];
-        }
-        out[batch_id * M * N + idy * N + idx] = sum;
-    }
-}
-
-void batch_matmul(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+    // TODO print d_out and compare 
     // printf("batch_size: %lu, M: %lu, K: %lu, N: %lu\n", (unsigned long)batch_size, (unsigned long)M, (unsigned long)K, (unsigned long)N);
-    dim3 blockDim(16, 16); 
-    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size); 
-    batch_matmul_kernel<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
-}
-
-__global__ void batch_matmul_kernel_v1(float *in1, float *in2, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t idy = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t batch_id = blockIdx.z;
-
-    if (idx < N && idy < M) {
-        float sum = 0;
-        for (size_t k = 0; k < K; k++) {
-            sum += in1[batch_id * M * K + idy * K + k] * in2[k * N + idx];
-        }
-        out[batch_id * M * N + idy * N + idx] = sum;
-    }
-}
-
-__global__ void batch_matmul_kernel_v2(float *A, float *B, float *C, size_t batch_size, size_t M, size_t K, size_t N) {
-    __shared__ float A_shared[TILE_SIZE][TILE_SIZE];
-    __shared__ float B_shared[TILE_SIZE][TILE_SIZE];
-
-    size_t batch_id = blockIdx.z;
-    size_t global_row = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t global_col = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t local_row = threadIdx.y;
-    size_t local_col = threadIdx.x;
-
-    float sum = 0.0f;
-
-    for (size_t t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
-        int A_local_row = batch_id * M * K + global_row * K + t * TILE_SIZE + local_col;
-        int B_local_col = (t * TILE_SIZE + local_row) * N + global_col;
-        if (global_row < M && t * TILE_SIZE + local_col < K) {
-            A_shared[local_row][local_col] = A[A_local_row];
-        } else {
-            A_shared[local_row][local_col] = 0.0f; 
-        }
-
-        if (global_col < N && t * TILE_SIZE + local_row < K) {
-            B_shared[local_row][local_col] = B[B_local_col];
-        } else {
-            B_shared[local_row][local_col] = 0.0f; 
-        }
-
-        __syncthreads();
-
-        for (size_t k = 0; k < TILE_SIZE; ++k) {
-            sum += A_shared[local_row][k] * B_shared[k][local_col];
-        }
-
-        __syncthreads();
-    }
-
-    if (global_row < M && global_col < N) {
-        C[batch_id * M * N + global_row * N + global_col] = sum;
-    }
-}
-
-
-void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
-    dim3 blockDim(TILE_SIZE, TILE_SIZE);
-    dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
-
-    batch_matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
+    // print_device_pointer(d_in, 10, 0); 
+    // print_device_pointer(d_w, 10, 0);
+    // print_device_pointer(d_out, 10, 0); 
+    // count += 1; 
+    // if (count == 3)
+    //   exit(1);
+    add_bias_kernel<<<gridDim, blockDim>>>(d_out, d_b, batch_size, M, N);
 }
 
 /* Token + Positional Embedding
