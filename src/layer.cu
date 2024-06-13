@@ -161,31 +161,31 @@ __global__ void batch_matmul_kernel_v2(float *A, float *B, float *C, size_t batc
     size_t batch_id = blockIdx.z;
     size_t global_row = blockIdx.y * blockDim.y + threadIdx.y;
     size_t global_col = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t local_row = threadIdx.y;
-    size_t local_col = threadIdx.x;
+    // size_t local_row = threadIdx.y;
+    // size_t local_col = threadIdx.x;
 
     float sum = 0.0f;
 
     for (size_t k = 0; k < (K + TILE_SIZE - 1) / TILE_SIZE; k++) {
         int A_local_row = batch_id * M * K + global_row * K + k * TILE_SIZE + local_col;
-        int B_local_col = (k * TILE_SIZE + local_row) * N + global_col;
+        int B_local_col = (k * TILE_SIZE + threadIdx.y) * N + global_col;
         
-        if (global_row < M && k * TILE_SIZE + local_col < K) {
-            A_shared[local_row][local_col] = A[A_local_row];
+        if (global_row < M && k * TILE_SIZE + threadIdx.x < K) {
+            A_shared[threadIdx.y][threadIdx.x] = A[A_local_row];
         } else {
-            A_shared[local_row][local_col] = 0.0f; 
+            A_shared[threadIdx.y][threadIdx.x] = 0.0f; 
         }
 
-        if (global_col < N && k * TILE_SIZE + local_row < K) {
-            B_shared[local_row][local_col] = B[B_local_col];
+        if (global_col < N && k * TILE_SIZE + threadIdx.y < K) {
+            B_shared[threadIdx.y][threadIdx.x] = B[B_local_col];
         } else {
-            B_shared[local_row][local_col] = 0.0f; 
+            B_shared[threadIdx.y][threadIdx.x] = 0.0f; 
         }
 
         __syncthreads();
 
         for (size_t k = 0; k < TILE_SIZE; k++) {
-            sum += A_shared[local_row][k] * B_shared[k][local_col];
+            sum += A_shared[threadIdx.y][k] * B_shared[k][threadIdx.x];
         }
 
         __syncthreads();
@@ -353,6 +353,7 @@ void batch_linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t batc
     dim3 blockDim(TILE_SIZE, TILE_SIZE);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
 
+    // TODO fusion later
     batch_matmul_kernel_v2<<<gridDim, blockDim>>>(d_in, d_w, d_out, batch_size, M, K, N);
 
     // TODO print d_out and compare 
