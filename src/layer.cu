@@ -167,7 +167,7 @@ __global__ void batch_matmul_kernel_v2(float *A, float *B, float *C, size_t batc
     float sum = 0.0f;
 
     for (size_t k = 0; k < (K + TILE_SIZE - 1) / TILE_SIZE; k++) {
-        int A_local_row = batch_id * M * K + global_row * K + k * TILE_SIZE + local_col;
+        int A_local_row = batch_id * M * K + global_row * K + k * TILE_SIZE + threadIdx.x;
         int B_local_col = (k * TILE_SIZE + threadIdx.y) * N + global_col;
         
         if (global_row < M && k * TILE_SIZE + threadIdx.x < K) {
@@ -199,6 +199,8 @@ __global__ void batch_matmul_kernel_v2(float *A, float *B, float *C, size_t batc
 void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
     dim3 blockDim(TILE_SIZE, TILE_SIZE);
     dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
+    // TODO not use batch_size as B is shared across batches
+    // TODO use batch_size within blockDim 
 
     batch_matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
 }
@@ -1353,4 +1355,21 @@ void batch_top1_sampling(float *d_in, int *d_out, size_t batch_size, size_t n_to
     dim3 blockDim(256);
     dim3 gridDim((batch_size + blockDim.x - 1) / blockDim.x);
     batch_top1_sampling_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, n_token, position, s, V);
+}
+
+__global__ void batch_update_cache_kernel(float *kv, float *kv_cache, size_t batch_size, size_t seq_len, size_t head_dim, size_t t) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch_size * seq_len * head_dim) {
+        size_t batch_id = idx / (seq_len * head_dim);
+        size_t local_idx = idx % (seq_len * head_dim);
+
+        kv_cache[batch_id * seq_len * head_dim + t * head_dim + local_idx] = kv[idx];
+    }
+}
+
+void batch_update_cache(float *kv, float *kv_cache, size_t batch_size, size_t seq_len, size_t head_dim, size_t t) {
+    size_t N = batch_size * seq_len * head_dim;
+    dim3 blockDim(256);
+    dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
+    batch_update_cache_kernel<<<gridDim, blockDim>>>(kv, kv_cache, batch_size, seq_len, head_dim, t);
 }
