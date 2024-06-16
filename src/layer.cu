@@ -4,7 +4,7 @@
 #include <iostream>
 #include "model.h"
 
-#define TILE_SIZE 32
+#define TILE_SIZE 16
 
 /* Matmul
  * @param [in1]  in1: [M, K]
@@ -161,13 +161,11 @@ __global__ void batch_matmul_kernel_v2(float *A, float *B, float *C, size_t batc
     size_t batch_id = blockIdx.z;
     size_t global_row = blockIdx.y * blockDim.y + threadIdx.y;
     size_t global_col = blockIdx.x * blockDim.x + threadIdx.x;
-    // size_t local_row = threadIdx.y;
-    // size_t local_col = threadIdx.x;
 
     float sum = 0.0f;
 
     for (size_t k = 0; k < (K + TILE_SIZE - 1) / TILE_SIZE; k++) {
-        int A_local_row = batch_id * M * K + global_row * K + k * TILE_SIZE + local_col;
+        int A_local_row = batch_id * M * K + global_row * K + k * TILE_SIZE + threadIdx.x;
         int B_local_col = (k * TILE_SIZE + threadIdx.y) * N + global_col;
         
         if (global_row < M && k * TILE_SIZE + threadIdx.x < K) {
@@ -196,11 +194,73 @@ __global__ void batch_matmul_kernel_v2(float *A, float *B, float *C, size_t batc
     }
 }
 
-void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
-    dim3 blockDim(TILE_SIZE, TILE_SIZE);
-    dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
+#define A_MULTIPLE 4
+#define B_MULTIPLE 4 
 
-    batch_matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
+__global__ void batch_matmul_kernel_v3(float *A, float *B, float *C, int M, int K, int N) {
+    __shared__ float As[TILE_SIZE * A_MULTIPLE][TILE_SIZE];
+    __shared__ float Bs[TILE_SIZE][TILE_SIZE * B_MULTIPLE];
+
+    size_t row = blockIdx.y * blockDim.y * A_MULTIPLE + threadIdx.y;
+    size_t col = blockIdx.x * blockDim.x * B_MULTIPLE + threadIdx.x;
+    int batch_id = blockIdx.z;  
+    
+    float sums[A_MULTIPLE][B_MULTIPLE] = {0.0};
+    int i, j, k;
+
+    for (int m = 0; m < (K + TILE_SIZE - 1) / TILE_SIZE; ++m) {
+        for (i = 0; i < A_MULTIPLE; ++i) {
+            int rowIdx = row + i * TILE_SIZE; 
+            if (m * TILE_SIZE + threadIdx.x < K && rowIdx < M) {
+                As[threadIdx.y * A_MULTIPLE + i][threadIdx.x] = A[batch_id * M * K + rowIdx * K + m * TILE_SIZE + threadIdx.x];
+            } else {
+                As[threadIdx.y * A_MULTIPLE + i][threadIdx.x] = 0.0f; 
+            }
+        }
+        for (i = 0; i < B_MULTIPLE; ++i) {
+            int colIdx = col + i * TILE_SIZE;
+            if (m * TILE_SIZE+ threadIdx.y < K && colIdx < N) {
+              Bs[threadIdx.y][threadIdx.x + i * TILE_SIZE] = B[(m * TILE_SIZE + threadIdx.y) * N + colIdx];
+            } else {
+                Bs[threadIdx.y][threadIdx.x + i * TILE_SIZE] = 0.0f; 
+            }
+        }
+
+        __syncthreads();
+
+        for (k = 0; k < TILE_SIZE; k++) {
+            for (i = 0; i < A_MULTIPLE; ++i) {
+                for (j = 0; j < B_MULTIPLE; ++j) {
+                    sums[i][j] += As[threadIdx.y * A_MULTIPLE + i][k] * Bs[k][threadIdx.x + j * TILE_SIZE];
+                }
+            }
+        }
+        
+        __syncthreads(); 
+    }
+
+    for (int i = 0; i < A_MULTIPLE; ++i) {
+        int rowIdx = row + i * TILE_SIZE; 
+        for (int j = 0; j < B_MULTIPLE; ++j) {
+            int colIdx = col + j * TILE_SIZE;
+            if (rowIdx < M && colIdx < N) {
+                C[batch_id * M * N + rowIdx * N + colIdx] = sums[i][j];
+            }
+        }
+    }
+}
+
+
+void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+    // dim3 blockDim(TILE_SIZE, TILE_SIZE);
+    // dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
+
+    // batch_matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
+
+    dim3 blockDim(TILE_SIZE, TILE_SIZE);
+    dim3 gridDim((N + TILE_SIZE * B_MULTIPLE - 1) / (TILE_SIZE * B_MULTIPLE), (M + TILE_SIZE * A_MULTIPLE - 1) / (TILE_SIZE * A_MULTIPLE), batch_size);
+
+    batch_matmul_kernel_v3<<<gridDim, blockDim>>>(d_in1, d_in2, d_out,  M, K, N);
 }
 
 /* Linear
