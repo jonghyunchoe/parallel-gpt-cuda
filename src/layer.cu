@@ -200,15 +200,15 @@ __global__ void batch_matmul_kernel_v3(float *A, float *B, float *C, int M, int 
     __shared__ float As[TILE_SIZE * A_MULTIPLE][TILE_SIZE];
     __shared__ float Bs[TILE_SIZE][TILE_SIZE * B_MULTIPLE];
 
+    size_t batch_id = blockIdx.z;  
     size_t row = blockIdx.y * blockDim.y * A_MULTIPLE + threadIdx.y;
     size_t col = blockIdx.x * blockDim.x * B_MULTIPLE + threadIdx.x;
-    int batch_id = blockIdx.z;  
     
     float sums[A_MULTIPLE][B_MULTIPLE] = {0.0};
     int i, j, k;
 
-    for (int m = 0; m < (K + TILE_SIZE - 1) / TILE_SIZE; ++m) {
-        for (i = 0; i < A_MULTIPLE; ++i) {
+    for (int m = 0; m < (K + TILE_SIZE - 1) / TILE_SIZE; m++) {
+        for (i = 0; i < A_MULTIPLE; i++) {
             int rowIdx = row + i * TILE_SIZE; 
             if (m * TILE_SIZE + threadIdx.x < K && rowIdx < M) {
                 As[threadIdx.y * A_MULTIPLE + i][threadIdx.x] = A[batch_id * M * K + rowIdx * K + m * TILE_SIZE + threadIdx.x];
@@ -216,9 +216,9 @@ __global__ void batch_matmul_kernel_v3(float *A, float *B, float *C, int M, int 
                 As[threadIdx.y * A_MULTIPLE + i][threadIdx.x] = 0.0f; 
             }
         }
-        for (i = 0; i < B_MULTIPLE; ++i) {
+        for (i = 0; i < B_MULTIPLE; i++) {
             int colIdx = col + i * TILE_SIZE;
-            if (m * TILE_SIZE+ threadIdx.y < K && colIdx < N) {
+            if (m * TILE_SIZE + threadIdx.y < K && colIdx < N) {
               Bs[threadIdx.y][threadIdx.x + i * TILE_SIZE] = B[(m * TILE_SIZE + threadIdx.y) * N + colIdx];
             } else {
                 Bs[threadIdx.y][threadIdx.x + i * TILE_SIZE] = 0.0f; 
@@ -228,8 +228,8 @@ __global__ void batch_matmul_kernel_v3(float *A, float *B, float *C, int M, int 
         __syncthreads();
 
         for (k = 0; k < TILE_SIZE; k++) {
-            for (i = 0; i < A_MULTIPLE; ++i) {
-                for (j = 0; j < B_MULTIPLE; ++j) {
+            for (i = 0; i < A_MULTIPLE; i++) {
+                for (j = 0; j < B_MULTIPLE; j++) {
                     sums[i][j] += As[threadIdx.y * A_MULTIPLE + i][k] * Bs[k][threadIdx.x + j * TILE_SIZE];
                 }
             }
@@ -238,9 +238,9 @@ __global__ void batch_matmul_kernel_v3(float *A, float *B, float *C, int M, int 
         __syncthreads(); 
     }
 
-    for (int i = 0; i < A_MULTIPLE; ++i) {
+    for (int i = 0; i < A_MULTIPLE; i++) {
         int rowIdx = row + i * TILE_SIZE; 
-        for (int j = 0; j < B_MULTIPLE; ++j) {
+        for (int j = 0; j < B_MULTIPLE; j++) {
             int colIdx = col + j * TILE_SIZE;
             if (rowIdx < M && colIdx < N) {
                 C[batch_id * M * N + rowIdx * N + colIdx] = sums[i][j];

@@ -275,6 +275,7 @@ void mha(float *d_in, float *d_attn_b, float *d_attn_w,
     batch_split_head(d_mha_split_qkv_a[gpu_id], d_mha_split_head_a[gpu_id], batch_size, NUM_HEAD, seq_len, HIDDEN_DIM);
     batch_generate_mask(d_mha_mask_a[gpu_id], batch_size, seq_len);
 
+    // TODO parallelize this portion instead of for loop
     for (size_t idx = 0; idx < NUM_HEAD; idx++) {
         batch_extract_qkv(d_mha_split_head_a[gpu_id], d_mha_q_a[gpu_id], d_mha_k_a[gpu_id], d_mha_v_a[gpu_id], batch_size, idx, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
         attention(d_mha_q_a[gpu_id], d_mha_k_a[gpu_id], d_mha_v_a[gpu_id], d_mha_mask_a[gpu_id], d_mha_attn_out_a[gpu_id], seq_len, HIDDEN_DIM / NUM_HEAD, batch_size, gpu_id);
