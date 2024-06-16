@@ -5,6 +5,8 @@
 #include "model.h"
 
 #define TILE_SIZE 16
+#define A_MULTIPLE 2
+#define B_MULTIPLE 16
 
 /* Matmul
  * @param [in1]  in1: [M, K]
@@ -193,9 +195,6 @@ __global__ void batch_matmul_kernel_v2(float *A, float *B, float *C, size_t batc
         C[batch_id * M * N + global_row * N + global_col] = sum;
     }
 }
-
-#define A_MULTIPLE 4
-#define B_MULTIPLE 4 
 
 __global__ void batch_matmul_kernel_v3(float *A, float *B, float *C, int M, int K, int N) {
     __shared__ float As[TILE_SIZE * A_MULTIPLE][TILE_SIZE];
