@@ -410,21 +410,19 @@ __global__ void add_bias_kernel(float *D, float *C, size_t batch_size, size_t M,
 int count = 0;
 
 void batch_linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
+    // dim3 blockDim(TILE_SIZE, TILE_SIZE);
+    // dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
+
+    // // TODO fusion later
+    // batch_matmul_kernel_v2<<<gridDim, blockDim>>>(d_in, d_w, d_out, batch_size, M, K, N);
+
     dim3 blockDim(TILE_SIZE, TILE_SIZE);
-    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
-
-    // TODO fusion later
-    batch_matmul_kernel_v2<<<gridDim, blockDim>>>(d_in, d_w, d_out, batch_size, M, K, N);
-
-    // TODO print d_out and compare 
-    // printf("batch_size: %lu, M: %lu, K: %lu, N: %lu\n", (unsigned long)batch_size, (unsigned long)M, (unsigned long)K, (unsigned long)N);
-    // print_device_pointer(d_in, 10, 0); 
-    // print_device_pointer(d_w, 10, 0);
-    // print_device_pointer(d_out, 10, 0); 
-    // count += 1; 
-    // if (count == 3)
-    //   exit(1);
-    add_bias_kernel<<<gridDim, blockDim>>>(d_out, d_b, batch_size, M, N);
+    dim3 gridDim((N + TILE_SIZE * B_MULTIPLE - 1) / (TILE_SIZE * B_MULTIPLE), (M + TILE_SIZE * A_MULTIPLE - 1) / (TILE_SIZE * A_MULTIPLE), batch_size);
+    batch_matmul_kernel_v3<<<gridDim, blockDim>>>(d_in, d_w, d_out,  M, K, N);
+  
+    dim3 blockDim2(TILE_SIZE, TILE_SIZE);
+    dim3 gridDim2((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
+    add_bias_kernel<<<gridDim2, blockDim2>>>(d_out, d_b, batch_size, M, N);
 }
 
 /* Token + Positional Embedding
