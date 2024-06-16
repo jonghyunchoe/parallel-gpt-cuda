@@ -1204,6 +1204,29 @@ void batch_extract_qkv(float *d_in, float *d_q, float *d_k, float *d_v, size_t b
     batch_extract_qkv_kernel<<<gridDim, blockDim>>>(d_in, head_idx, n_head, d_q, d_k, d_v, batch_size, s, H_, N);
 }
 
+__global__ void batch_head_extract_qkv_kernel(float *in, size_t n_head, float *q, float *k, float *v, size_t batch_size, size_t s, size_t H_, size_t N) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < batch_size * n_head * N) {
+        size_t head_id = (idx / N) % n_head;
+        size_t batch_id = idx / (n_head * N);
+        size_t local_idx = idx % N;
+        size_t i = local_idx / H_;
+        size_t j = local_idx % H_;
+
+        q[batch_id * n_head * s * H_ + head_id * s * H_ + i * H_ + j] = in[batch_id * 3 * n_head * s * H_ + 0 * n_head * s * H_ + head_id * s * H_ + i * H_ + j];
+        k[batch_id * n_head * s * H_ + head_id * s * H_ + i * H_ + j] = in[batch_id * 3 * n_head * s * H_ + 1 * n_head * s * H_ + head_id * s * H_ + i * H_ + j];
+        v[batch_id * n_head * s * H_ + head_id * s * H_ + i * H_ + j] = in[batch_id * 3 * n_head * s * H_ + 2 * n_head * s * H_ + head_id * s * H_ + i * H_ + j];
+    }
+}
+
+void batch_head_extract_qkv(float *d_in, float *d_q, float *d_k, float *d_v, size_t batch_size, size_t n_head, size_t s, size_t H_) {
+    size_t N = s * H_;
+    dim3 blockDim(256);
+    dim3 gridDim((batch_size * n_head * N + blockDim.x - 1) / blockDim.x);
+    batch_head_extract_qkv_kernel<<<gridDim, blockDim>>>(d_in, n_head, d_q, d_k, d_v, batch_size, s, H_, N);
+}
+
 /* Merge each heads
  * @param [in1]       in: [s, H_]
  * @param [in2] head_idx: [1]
