@@ -262,26 +262,10 @@ void attention(float *d_q, float *d_k, float *d_v, float *d_mask, float *d_out, 
 
     batch_transpose(d_k, d_k_transposed_a[gpu_id], batch_size, seq_len, head_dim);
     batch_matmul(d_q, d_k_transposed_a[gpu_id], d_attn_score_a[gpu_id], batch_size, seq_len, head_dim, seq_len);
-    // if (gpu_id == 0) {
-    //   print_device_pointer(d_attn_score_a[gpu_id], 768, gpu_id);
-    //   exit(1);
-    // }
     batch_scaling(d_attn_score_a[gpu_id], 1.0 / sqrt(head_dim), batch_size, seq_len * seq_len);
     batch_add(d_attn_score_a[gpu_id], d_mask, batch_size, seq_len * seq_len);
-    // if (gpu_id == 0) {
-    //   print_device_pointer(d_attn_score_a[gpu_id], 768, gpu_id);
-    //   exit(1);
-    // }
     batch_softmax(d_attn_score_a[gpu_id], batch_size, seq_len, seq_len);
-    // if (gpu_id == 0) {
-    //   print_device_pointer(d_attn_score_a[gpu_id], 768, gpu_id);
-    //   exit(1);
-    // }
     batch_matmul(d_attn_score_a[gpu_id], d_v, d_out, batch_size, seq_len, seq_len, head_dim);
-    // if (gpu_id == 0) {
-    //   print_device_pointer(d_out, 10, gpu_id);
-    //   exit(1);
-    // }
 }
 
 void mha(float *d_in, float *d_attn_b, float *d_attn_w,
@@ -293,49 +277,10 @@ void mha(float *d_in, float *d_attn_b, float *d_attn_w,
     batch_split_head(d_mha_split_qkv_a[gpu_id], d_mha_split_head_a[gpu_id], batch_size, NUM_HEAD, seq_len, HIDDEN_DIM);
     batch_generate_mask(d_mha_mask_a[gpu_id], batch_size * NUM_HEAD, seq_len);
 
-    // printf("d_mha_split_head_a: \n");
-    if (gpu_id == 0) {
-      // print_device_pointer(d_mha_split_head_a[gpu_id], 10, gpu_id);
-      // exit(1);
-    }
-
-    // TODO parallelize this portion instead of for loop
     batch_head_extract_qkv(d_mha_split_head_a[gpu_id], d_mha_q_a[gpu_id], d_mha_k_a[gpu_id], d_mha_v_a[gpu_id], batch_size, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
-    // printf("d_mha_qkv_proj_a: \n");
-    // print_device_pointer(d_mha_qkv_proj_a[gpu_id], 768, gpu_id);
-    // printf("d_mha_q_a: \n");
-    // print_device_pointer(d_mha_q_a[gpu_id], 768, gpu_id);
-    // exit(1);
-    // if (gpu_id == 0) {
-    //     printf("d_mha_q_a: \n");
-    //     print_device_pointer(d_mha_q_a[gpu_id], 768 * 2, gpu_id);
-    //     exit(1);
-    // }
-
     attention(d_mha_q_a[gpu_id], d_mha_k_a[gpu_id], d_mha_v_a[gpu_id], d_mha_mask_a[gpu_id], d_mha_attn_out_a[gpu_id], seq_len, HIDDEN_DIM / NUM_HEAD, batch_size * NUM_HEAD, gpu_id);
 
-    // for (size_t idx = 0; idx < NUM_HEAD; idx++) {
-    //     // TODO modify batch_extract_qkv, attention operations to receive NUM_HEAD amount of device pointers at once
-    //     batch_extract_qkv(d_mha_split_head_a[gpu_id], d_mha_q_a[gpu_id], d_mha_k_a[gpu_id], d_mha_v_a[gpu_id], batch_size, idx, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
-    //     attention(d_mha_q_a[gpu_id], d_mha_k_a[gpu_id], d_mha_v_a[gpu_id], d_mha_mask_a[gpu_id], d_mha_attn_out_a[gpu_id], seq_len, HIDDEN_DIM / NUM_HEAD, batch_size, gpu_id);
-    //     batch_merge_head(d_mha_attn_out_a[gpu_id], d_mha_merge_head_a[gpu_id], batch_size, NUM_HEAD, idx, seq_len, HIDDEN_DIM / NUM_HEAD);
-    // }
-
-    // if (gpu_id == 0) {
-    //   printf("d_mha_attn_out_a: \n");
-    //   print_device_pointer(d_mha_attn_out_a[gpu_id], 768 * 17, gpu_id);
-    //   exit(1);
-    // }
-
-    // batch_concat_head(d_mha_merge_head_a[gpu_id], d_mha_concat_head_a[gpu_id], batch_size, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
     batch_concat_head(d_mha_attn_out_a[gpu_id], d_mha_concat_head_a[gpu_id], batch_size, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
-    
-    // if (gpu_id == 0) {
-    //   printf("d_mha_concat_head_a: \n");
-    //   print_device_pointer(d_mha_concat_head_a[gpu_id], 768, gpu_id);
-    //   exit(1);
-    // }
-    
     batch_linear(d_mha_concat_head_a[gpu_id], d_proj_w, d_proj_b, d_out, batch_size, seq_len, HIDDEN_DIM, HIDDEN_DIM);
 }
 
