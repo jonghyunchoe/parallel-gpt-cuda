@@ -8,7 +8,7 @@
 #include "model.h"
 
 #define BATCH_SIZE 2048
-#define NGPU 4  // Number of GPUs per node
+#define NGPU 4 
 
 #define CHECK_CUDA(call)                                              \
   do {                                                                \
@@ -247,7 +247,6 @@ void free_activations(int gpu_id) {
   cudaFree(d_transformer_block_a[gpu_id]);
 }
 
-// Adapted functions for multi-GPU
 void ffn(float *d_in, float *d_mlp1_w, float *d_mlp1_b,
          float *d_mlp2_w, float *d_mlp2_b, float *d_out, size_t seq_len, size_t batch_size, int gpu_id) {
     cudaSetDevice(gpu_id);
@@ -302,36 +301,15 @@ void transformer_block(float *d_in, float *d_attn_b, float *d_attn_w,
 }
 
 __global__ void insert_tokens_kernel(int *d_out, int *d_input_prompt, int *d_buffer, int prompt_size, int n_token, int batch_size, int position, int total_size) {
-    // TODO update 
-    // int total_size = batch_size * (prompt_size + batch_size);
-
-    // Overwriting to d_out here 
-    // Maybe something with temp? 
-    // TODO allocate separate temp device pointer and do cudaMalloc and pass pointer to here 
-    // temp device pointer should be for ngpus 
-    // *d_buffer[ngpu] would work
-
-    // int *temp = new int[total_size];
-
     for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < prompt_size; j++) {
-            // 첫번째 prompt는 그대로 
-            // 두번째 prompt는 원래에서 + 1 
-            // 세번째 prompt는 원래에서 + 2 
-            // ... 
             d_buffer[i * prompt_size + i + j] = d_input_prompt[i * prompt_size + j];
         }
     }
 
     for (int i = 0; i < batch_size; i++) {
-        // 첫번째는 첫번째 prompt의 끝 (prompt_size)
-        // 두번째는 두번째 prompt의 끝 (prompt_size * 2 + 1)
-        // 세번째는 세번째 prompt의 끝 (prompt_size * 3 + 2)
         int insert_position = (i + 1) * prompt_size + i;
-        // switch i + position to i * prompt_size + position where position is nth token 
-        // temp[insert_position] = d_out[i + position];
         d_buffer[insert_position] = d_out[i * n_token + position];
-        // printf("Inserting token %d at position %d from i + position %d\n", d_out[i * n_token + position], insert_position, i * n_token + position);
     }
 
     for (int i = 0; i < total_size; i++) {
@@ -339,13 +317,11 @@ __global__ void insert_tokens_kernel(int *d_out, int *d_input_prompt, int *d_buf
     }
 }
 
-
 void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
     int mpi_rank, mpi_size;
     MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
 
-    printf("\n");
     if (mpi_rank != 0) {
         input = (int *)malloc(n_prompt * tokens_per_prompt * sizeof(int));
         output = (int *)malloc(n_prompt * n_token * sizeof(int));
@@ -375,13 +351,10 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
             size_t end_idx = (gpu_id == NGPU - 1) ? batch_size : (gpu_id + 1) * (batch_size / NGPU);
             size_t gpu_batch_size = end_idx - start_idx;
 
-            // TODO check if d_input_prompt has to be allocated gpu_batch_size instead of batch_size
             CHECK_CUDA(cudaMalloc(&d_input_prompt[gpu_id], batch_size * (prompt_size + n_token - 1) * sizeof(int)));
             CHECK_CUDA(cudaMalloc(&d_buffer[gpu_id], batch_size * (prompt_size + n_token - 1) * sizeof(int)));
-            // TODO allocate batch_size * n_token as d_out will contain n_token tokens for each batch
             CHECK_CUDA(cudaMalloc(&d_out[gpu_id], batch_size * n_token * sizeof(int)));
             alloc_activations(batch_size * (prompt_size + n_token - 1), gpu_id);
-            // Copy input_prompt to d_input_prompt before token generation loop
             CHECK_CUDA(cudaMemcpy(d_input_prompt[gpu_id], input_prompt.data() + start_idx * prompt_size, gpu_batch_size * prompt_size * sizeof(int), cudaMemcpyHostToDevice));
         }
 
@@ -391,13 +364,6 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
                 size_t start_idx = gpu_id * (batch_size / NGPU);
                 size_t end_idx = (gpu_id == NGPU - 1) ? batch_size : (gpu_id + 1) * (batch_size / NGPU);
                 size_t gpu_batch_size = end_idx - start_idx;
-
-                // CHECK_CUDA(cudaMemcpy(d_input_prompt[gpu_id], input_prompt.data() + start_idx * prompt_size, gpu_batch_size * prompt_size * sizeof(int), cudaMemcpyHostToDevice));
-                
-                // Print input prompt
-                // print_device_pointer(d_input_prompt[gpu_id], gpu_batch_size * prompt_size, gpu_id, "d_input_prompt at start of token generation loop");
-
-                // print_device_pointer(d_out[gpu_id], gpu_batch_size * n_token, gpu_id, "d_out at start of token generation loop");
 
                 batch_token_pos_embedding(d_input_prompt[gpu_id], d_wte[gpu_id], d_wpe[gpu_id], d_embd_a[gpu_id], gpu_batch_size, prompt_size, HIDDEN_DIM);
 
@@ -412,58 +378,21 @@ void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
                 batch_layer_norm(d_embd_a[gpu_id], d_ln_f_g[gpu_id], d_ln_f_b[gpu_id], gpu_batch_size, prompt_size, HIDDEN_DIM, 1e-5);
                 transpose(d_wte[gpu_id], d_wte_transposed_a[gpu_id], wte->shape[0], wte->shape[1]);
                 batch_matmul_final(d_embd_a[gpu_id], d_wte_transposed_a[gpu_id], d_logit_a[gpu_id], gpu_batch_size, prompt_size, HIDDEN_DIM, wte->shape[0]);
-                // TODO add d_out to next batch_size index instead of starting from 0 
-                // TODO change name from position to more appropriate name 
-                // print_device_pointer(d_out[gpu_id], gpu_batch_size * n_token, gpu_id, "d_out before top1_sampling");
-                // batch_top1_sampling(d_logit_a[gpu_id], d_out[gpu_id], gpu_batch_size, gpu_batch_size * t, prompt_size, NUM_VOCAB);
                 batch_top1_sampling(d_logit_a[gpu_id], d_out[gpu_id], gpu_batch_size, n_token, t, prompt_size, NUM_VOCAB);
-
-                // print_device_pointer(d_out[gpu_id], gpu_batch_size * n_token, gpu_id, "d_out after top1_sampling");
-                // Insert tokens directly from d_out to d_input_prompt
-                // print_device_pointer(d_input_prompt[gpu_id], gpu_batch_size * (prompt_size + t + 1), gpu_id, "d_input_prompt before inserting tokens");
-                // TODO move previous input_prompt a step away 
-                // insert_tokens_kernel<<<1, 1>>>(d_out[gpu_id], d_input_prompt[gpu_id], prompt_size, gpu_batch_size, gpu_batch_size * t, batch_size * (prompt_size + n_token - 1));
                 insert_tokens_kernel<<<1, 1>>>(d_out[gpu_id], d_input_prompt[gpu_id], d_buffer[gpu_id], prompt_size, n_token, gpu_batch_size, t, batch_size * (prompt_size + n_token - 1));
-                // print_device_pointer(d_out[gpu_id], gpu_batch_size * n_token, gpu_id, "d_out after inserting token");
-                // print_device_pointer(d_input_prompt[gpu_id], gpu_batch_size * (prompt_size + t + 1), gpu_id, "d_input_prompt after inserting tokens");
             }
 
             prompt_size += 1;
-            // if (t == 4)
-            //   exit(1);
         }
 
-        // for (int gpu_id = 0; gpu_id < NGPU; gpu_id++) {
-        //     cudaSetDevice(gpu_id);
-        //     CHECK_CUDA(cudaFree(d_input_prompt[gpu_id]));
-        //     CHECK_CUDA(cudaFree(d_out[gpu_id]));
-        //     free_activations(gpu_id);
-        // }
-
-        // TODO write from d_output to output 
         for (int gpu_id = 0; gpu_id < NGPU; gpu_id++) {
             cudaSetDevice(gpu_id); 
 
-            // For logging 
-            // TODO perhaps I should write to d_out first prompt's output and then second prompt's output instead of interleaving 
             size_t start_idx = gpu_id * (batch_size / NGPU);
             size_t end_idx = (gpu_id == NGPU - 1) ? batch_size : (gpu_id + 1) * (batch_size / NGPU);
             size_t gpu_batch_size = end_idx - start_idx;
-            // print_device_pointer(d_out[gpu_id], gpu_batch_size * n_token, gpu_id, "d_out before copying into output");
             CHECK_CUDA(cudaMemcpy(output + p * n_token + start_idx * n_token, d_out[gpu_id], gpu_batch_size * n_token * sizeof(int), cudaMemcpyDeviceToHost));
-            
-            // Print output 
-            // for (size_t i = 0; i < gpu_batch_size; i++) {
-            //     printf("Output for prompt %zu: ", p + i);
-            //     for (size_t j = 0; j < n_token; j++) {
-            //         printf("%d ", output[(p + i) * n_token + j]);
-            //     }
-            //     printf("\n");
-            // }
-            // printf("\n");
-
-            // Print output 
-            // print_device_pointer(d_out[gpu_id], batch_size * n_token, gpu_id, "d_out after token generation loop");
+            cudaFree(d_out);
         }
     }
 
