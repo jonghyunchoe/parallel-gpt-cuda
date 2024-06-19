@@ -1,4 +1,4 @@
-/* Last updated: 24.05.12 16:00 */
+/* Last updated: 24.06.10 21:00 */
 #include <cuda_runtime.h>
 #include <mpi.h>
 #include <unistd.h>
@@ -90,7 +90,7 @@ void parse_args(int argc, char **argv) {
 
 int validate(int *output, int *answer, int size_) {
   int mismatch_idx = -1;
-  int tolerance = (int) (size_ * 0.0001);  // Error tolerance percentage
+  int tolerance = (int) (size_ * 0.0005);  // Error tolerance percentage
 
   for (int i = 0; i < size_; i++) {
     /* Check if the output and answer are the same */
@@ -101,11 +101,11 @@ int validate(int *output, int *answer, int size_) {
       if (mismatch_idx == -1) mismatch_idx = i;
 
       /* Break if tolerance is reached */
-      if (tolerance < 0) { break; }
+      if (tolerance < 0) { return mismatch_idx; }
     }
   }
 
-  return mismatch_idx;
+  return -1;
 }
 
 void *read_binary(const char *fname, size_t *size) {

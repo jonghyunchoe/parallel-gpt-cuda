@@ -1,265 +1,191 @@
-#include "layer.h"
 #include <cstdio>
-#include <cmath>
-#include <iostream>
-#include "model.h"
 
-#define TILE_SIZE 16
-#define A_MULTIPLE 2
-#define B_MULTIPLE 16
+#include "layer.h"
 
-/* Matmul
- * @param [in1]  in1: [M, K]
- * @param [in2]  in2: [K, N]
- * @param [out]  out: [M, N]
+#define warp_size 32
+
+/* All-Reduction Sum
+ * @param  [tmpl] size: the number of threads to be reduced
+ * @param  [in]    val: a value to be reduced
+ * @return [ret]      : the sum of the value across threads
  */
-// void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
-//   size_t M = in1->shape[0];
-//   size_t K = in1->shape[1];
-//   size_t N = in2->shape[1];
-
-// #pragma omp parallel for
-//   for (size_t i = 0; i < M; i++) {
-//     for (size_t j = 0; j < N; j++) {
-//       out->buf[i * N + j] = 0;
-//       for (size_t k = 0; k < K; k++) {
-//         out->buf[i * N + j] += in1->buf[i * K + k] * in2->buf[k * N + j];
-//       }
-//     }
-//   }
-// }
-
-__global__ void matmul_kernel_v1(float *in1, float *in2, float *out, size_t M, size_t K, size_t N) {
-  size_t row = blockIdx.y * blockDim.y + threadIdx.y; 
-  size_t col = blockIdx.x * blockDim.x + threadIdx.x; 
-  
-  if (row < M && col < N) {
-    float sum = 0;
-    for (size_t k = 0; k < K; k++) {
-      sum += in1[row * K + k] * in2[k * N + col];
-    }
-    out[row * N + col] = sum; 
-  }
+template <int size>
+__device__ inline float all_reduce_sum(float val) {
+  static_assert(warp_size % size == 0);
+  #pragma unroll
+  for (int offset = size / 2; offset > 0; offset /= 2)
+    val += __shfl_xor_sync(0xffffffff, val, offset);
+  return val;
 }
 
-__global__ void matmul_kernel_v2(float *A, float *B, float *C, size_t M, size_t K, size_t N) {
-  __shared__ float A_shared[TILE_SIZE][TILE_SIZE];
-  __shared__ float B_shared[TILE_SIZE][TILE_SIZE];   
+/* Layer Normalization
+ * @param [in1]    in: [N, H]
+ * @param [in2] gamma: [H]
+ * @param [in3]  beta: [H]
+ * @param [out]   out: [N, H]
+ * @param [in4]     N: the number of tokens in the prompt
+ * @param [in5]     H: the hidden dimension
+ */
+__global__ void layer_norm_kernel(float *in, float *gamma, float *beta, float *out, int N, int H) {
+  // we could do...
+  // 1) float in_reg[H/warp_size]
+  // 2) gamma_shared, beta_shared
+  // 3) vectorize global memory access
+  int i = blockIdx.x * blockDim.y + threadIdx.y;
+  
+  float mean = 0.0f, var = 0.0f;
+  for (int j = threadIdx.x; j < H; j += warp_size) {
+    float x = in[i * H + j];
+    mean += x;
+    var += x * x;
+  }
 
-  int global_row = blockIdx.y * blockDim.y + threadIdx.y;
-  int global_col = blockIdx.x * blockDim.x + threadIdx.x; 
-  int local_row = threadIdx.y;
-  int local_col = threadIdx.x; 
+  mean = all_reduce_sum<warp_size>(mean);
+  var = all_reduce_sum<warp_size>(var);
+  mean /= H;
+  var = var / H - mean * mean;
+
+  for (int j = threadIdx.x; j < H; j += warp_size)
+    out[i * H + j] = (in[i * H + j] - mean) * rsqrtf(var + 1e-5) * gamma[j] + beta[j];
+}
+void layer_norm(float *in, float *gamma, float *beta, float *out, int N, int H) {
+  constexpr int BN = 8;
+  if (H % warp_size) {
+    fprintf(stderr, "Error: H must be a multiple of %d\n", warp_size);
+    exit(1);
+  }
+  if (N % BN) {
+    fprintf(stderr, "Error: N must be a multiple of %d\n", BN);
+    exit(1);
+  }
+  layer_norm_kernel<<<N / BN, dim3(warp_size, BN)>>>(in, gamma, beta, out, N, H);
+}
+
+/* Attention
+ * @param [in1]      q: [B, H]
+ * @param [in2]     kv: [B, MAX_LEN, 2 * H], but only length kv_len is valid
+ * @param [out]      o: [B, H]
+ * @param [in3] kv_len: the number of tokens in the context
+ */
+__global__ void attention_kernel(float *q, float *kv, float *o, int kv_len) {
+  constexpr int HEAD_DIM = 64, NUM_HEADS = 12, MAX_LEN = LEN_INPUT + LEN_OUTPUT;
+  constexpr int HIDDEN_DIM = HEAD_DIM * NUM_HEADS;
+  constexpr int nfloat = sizeof(float4) / sizeof(float);
+  constexpr float scale = 1.0f / 8.0f; // 1.0f / sqrtf(HEAD_DIM);
+  float s[MAX_LEN];
+
+  const int tid = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * warp_size;
+  q += blockIdx.x * HIDDEN_DIM + tid * nfloat;
+  o += blockIdx.x * HIDDEN_DIM + tid * nfloat;
+
+  float max_val = -INFINITY;
+  float * k = kv + 0 * HIDDEN_DIM + blockIdx.x * 2 * HIDDEN_DIM * MAX_LEN + tid * nfloat;
+  float * v = kv + 1 * HIDDEN_DIM + blockIdx.x * 2 * HIDDEN_DIM * MAX_LEN + tid * nfloat;
+
+  float4 rq = *(float4 *)q;
+  for (int i = 0; i < MAX_LEN; i++, k += 2 * HIDDEN_DIM) {
+    if (i == kv_len) break;
+    float4 rk = *(float4 *)k;
+    s[i] = rq.x * rk.x + rq.y * rk.y + rq.z * rk.z + rq.w * rk.w;
+    s[i] = all_reduce_sum<warp_size / 2>(s[i]);
+    s[i] *= scale;
+    if (s[i] > max_val) max_val = s[i];
+  }
 
   float sum = 0.0f;
-
-  for (int k = 0; k < (K + TILE_SIZE - 1) / TILE_SIZE; k++) {
-    int A_local_row = global_row * K + k * TILE_SIZE + local_col; 
-    int B_local_col = (k * TILE_SIZE + local_row) * N + global_col; 
-    
-    if (global_row < M && k * TILE_SIZE + local_col < K) {
-      A_shared[local_row][local_col] = A[A_local_row];
-    } else {
-      A_shared[local_row][local_col] = 0.0f; 
-    }
-
-    if (global_col < N && k * TILE_SIZE + local_row < K) {
-      B_shared[local_row][local_col] = B[B_local_col];
-    } else {
-      B_shared[local_row][local_col] = 0.0f; 
-    }
-
-    __syncthreads();
-
-    for (int n = 0; n < TILE_SIZE; n++) {
-      sum += A_shared[local_row][n] * B_shared[n][local_col];
-    }
-
-    __syncthreads(); 
+  for (int i = 0; i < MAX_LEN; i++) {
+    if (i == kv_len) break;
+    s[i] = exp(s[i] - max_val);
+    sum += s[i];
   }
 
-  if (global_row < M && global_col < N) {
-    C[global_row * N + global_col] = sum; 
+  float4 ro = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+  for (int i = 0; i < MAX_LEN; i++, v += 2 * HIDDEN_DIM) {
+    if (i == kv_len) break;
+    float4 rv = *(float4 *)v;
+    s[i] /= sum;
+    ro.x += s[i] * rv.x;
+    ro.y += s[i] * rv.y;
+    ro.z += s[i] * rv.z;
+    ro.w += s[i] * rv.w;
   }
+  *(float4 *)o = ro;
 }
+/* Attention
+ * @param [in1]      q: [B, kv_len, H]
+ * @param [in2]     kv: [B, MAX_LEN, 2 * H], but only length kv_len is valid
+ * @param [out]      o: [B, kv_len, H]
+ * @param [in3] kv_len: the number of tokens in the context
+ */
+__global__ void attention_kernel_multi(float *q, float *kv, float *o, int kv_len) {
+  constexpr int HEAD_DIM = 64, NUM_HEADS = 12, MAX_LEN = LEN_INPUT + LEN_OUTPUT;
+  constexpr int HIDDEN_DIM = HEAD_DIM * NUM_HEADS;
+  constexpr float scale = 1.0f / 8.0f; // 1.0f / sqrtf(HEAD_DIM);
+  __shared__ float buf[LEN_INPUT * LEN_INPUT];
 
+  int h = blockIdx.x, b = blockIdx.y;
 
-void matmul(Tensor *in1, Tensor *in2, Tensor *out) {
-  size_t M = in1->shape[0]; 
-  size_t K = in1->shape[1]; 
-  size_t N = in2->shape[1]; 
+  q += b * LEN_INPUT * HIDDEN_DIM + h * HEAD_DIM;
+  float * k = kv + b * MAX_LEN * 2 * HIDDEN_DIM + 0 * HIDDEN_DIM + h * HEAD_DIM;
+  float * v = kv + b * MAX_LEN * 2 * HIDDEN_DIM + 1 * HIDDEN_DIM + h * HEAD_DIM;
+  o += b * LEN_INPUT * HIDDEN_DIM + h * HEAD_DIM;
 
-  // printf("M: %lu, K: %lu, N: %lu\n", (unsigned long)M, (unsigned long)K, (unsigned long)N);
+  for (int i = threadIdx.x / LEN_INPUT; i < LEN_INPUT; i += warp_size / LEN_INPUT) {
+    float tmp = 0.0f;
+    int j = threadIdx.x % LEN_INPUT;
+    for (int k_ = 0; k_ < HEAD_DIM; k_++)
+      tmp += q[i * HIDDEN_DIM + k_] * k[j * 2 * HIDDEN_DIM + k_];
+    tmp *= scale;
+    if (i < j) tmp += -1e10;
+    buf[i * LEN_INPUT + j] = tmp;
+  }
+  __syncthreads();
 
-  float *d_in1; 
-  float *d_in2; 
-  float *d_out; 
-
-  cudaMalloc(&d_in1, M * K * sizeof(float)); 
-  cudaMalloc(&d_in2, K * N * sizeof(float)); 
-  cudaMalloc(&d_out, M * N * sizeof(float)); 
-
-  cudaMemcpy(d_in1, in1->buf, M * K * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_in2, in2->buf, K * N * sizeof(float), cudaMemcpyHostToDevice); 
-
-  dim3 blockDim(TILE_SIZE, TILE_SIZE);
-  dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
-  
-  matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N); 
-
-  cudaMemcpy(out->buf, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost); 
-
-  cudaFree(d_in1);
-  cudaFree(d_in2);
-  cudaFree(d_out);
-}
-
-void matmul(float *d_in1, float *d_in2, float *d_out, size_t M, size_t K, size_t N) {
-    dim3 blockDim(TILE_SIZE, TILE_SIZE);
-    dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
-    matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, M, K, N);
-}
-
-__global__ void batch_matmul_kernel(float *in1, float *in2, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t idy = blockIdx.y * blockDim.y + threadIdx.y;
-
-    size_t batch_id = blockIdx.z;
-
-    if (idx < N && idy < M) {
-        float sum = 0;
-        for (size_t k = 0; k < K; k++) {
-            sum += in1[batch_id * M * K + idy * K + k] * in2[batch_id * K * N + k * N + idx];
-        }
-        out[batch_id * M * N + idy * N + idx] = sum;
-    }
-}
-
-void batch_matmul(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
-    // printf("batch_size: %lu, M: %lu, K: %lu, N: %lu\n", (unsigned long)batch_size, (unsigned long)M, (unsigned long)K, (unsigned long)N);
-    dim3 blockDim(16, 16); 
-    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size); 
-    batch_matmul_kernel<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
-}
-
-__global__ void batch_matmul_kernel_v1(float *in1, float *in2, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t idy = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t batch_id = blockIdx.z;
-
-    if (idx < N && idy < M) {
-        float sum = 0;
-        for (size_t k = 0; k < K; k++) {
-            sum += in1[batch_id * M * K + idy * K + k] * in2[k * N + idx];
-        }
-        out[batch_id * M * N + idy * N + idx] = sum;
-    }
-}
-
-__global__ void batch_matmul_kernel_v2(float *A, float *B, float *C, size_t batch_size, size_t M, size_t K, size_t N) {
-    __shared__ float A_shared[TILE_SIZE][TILE_SIZE];
-    __shared__ float B_shared[TILE_SIZE][TILE_SIZE];
-
-    size_t batch_id = blockIdx.z;
-    size_t global_row = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t global_col = blockIdx.x * blockDim.x + threadIdx.x;
+  if (threadIdx.x < LEN_INPUT) {
+    float max_val = -INFINITY;
+    for (int i = 0; i < kv_len; i++)
+      if (buf[threadIdx.x * LEN_INPUT + i] > max_val)
+        max_val = buf[threadIdx.x * LEN_INPUT + i];
 
     float sum = 0.0f;
-
-    for (size_t k = 0; k < (K + TILE_SIZE - 1) / TILE_SIZE; k++) {
-        int A_local_row = batch_id * M * K + global_row * K + k * TILE_SIZE + threadIdx.x;
-        int B_local_col = (k * TILE_SIZE + threadIdx.y) * N + global_col;
-        
-        if (global_row < M && k * TILE_SIZE + threadIdx.x < K) {
-            A_shared[threadIdx.y][threadIdx.x] = A[A_local_row];
-        } else {
-            A_shared[threadIdx.y][threadIdx.x] = 0.0f; 
-        }
-
-        if (global_col < N && k * TILE_SIZE + threadIdx.y < K) {
-            B_shared[threadIdx.y][threadIdx.x] = B[B_local_col];
-        } else {
-            B_shared[threadIdx.y][threadIdx.x] = 0.0f; 
-        }
-
-        __syncthreads();
-
-        for (size_t k = 0; k < TILE_SIZE; k++) {
-            sum += A_shared[threadIdx.y][k] * B_shared[k][threadIdx.x];
-        }
-
-        __syncthreads();
+    for (int i = 0; i < kv_len; i++) {
+      buf[threadIdx.x * LEN_INPUT + i] = exp(buf[threadIdx.x * LEN_INPUT + i] - max_val);
+      sum += buf[threadIdx.x * LEN_INPUT + i];
     }
 
-    if (global_row < M && global_col < N) {
-        C[batch_id * M * N + global_row * N + global_col] = sum;
+    for (int i = 0; i < kv_len; i++)
+      buf[threadIdx.x * LEN_INPUT + i] /= sum;
+  }
+  __syncthreads();
+
+  for (int i = 0; i < LEN_INPUT; i++) {
+    for (int j = threadIdx.x; j < HEAD_DIM; j += warp_size) {
+      float tmp = 0.0f;
+      for (int k_ = 0; k_ < kv_len; k_++)
+        tmp += buf[i * LEN_INPUT + k_] * v[k_ * 2 * HIDDEN_DIM + j];
+      o[i * HIDDEN_DIM + j] = tmp;
     }
+  }
+}
+void attention(float *q, float *kv, float *o,
+               int h_dim, int n_head, int batch_size, int q_len, int kv_len) {
+  if (h_dim != 768 || n_head != 12) {
+    fprintf(stderr, "Error: h_dim must be 768 and n_head must be 12\n");
+    exit(1);
+  }
+
+  if (q_len == 1) attention_kernel<<<batch_size, dim3(warp_size / 2, 2, 6)>>>(q, kv, o, kv_len);
+  else attention_kernel_multi<<<dim3(n_head, batch_size), warp_size>>>(q, kv, o, kv_len);
 }
 
-__global__ void batch_matmul_kernel_v3(float *A, float *B, float *C, int M, int K, int N) {
-    __shared__ float As[TILE_SIZE * A_MULTIPLE][TILE_SIZE];
-    __shared__ float Bs[TILE_SIZE][TILE_SIZE * B_MULTIPLE];
-
-    size_t batch_id = blockIdx.z;  
-    size_t row = blockIdx.y * blockDim.y * A_MULTIPLE + threadIdx.y;
-    size_t col = blockIdx.x * blockDim.x * B_MULTIPLE + threadIdx.x;
-    
-    float sums[A_MULTIPLE][B_MULTIPLE] = {0.0};
-    int t, i, j, k;
-
-    for (t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; t++) {
-        for (i = 0; i < A_MULTIPLE; i++) {
-            int rowIdx = row + i * TILE_SIZE; 
-            if (t * TILE_SIZE + threadIdx.x < K && rowIdx < M) {
-                As[threadIdx.y * A_MULTIPLE + i][threadIdx.x] = A[batch_id * M * K + rowIdx * K + t * TILE_SIZE + threadIdx.x];
-            } else {
-                As[threadIdx.y * A_MULTIPLE + i][threadIdx.x] = 0.0f; 
-            }
-        }
-        for (i = 0; i < B_MULTIPLE; i++) {
-            int colIdx = col + i * TILE_SIZE;
-            if (t * TILE_SIZE + threadIdx.y < K && colIdx < N) {
-              Bs[threadIdx.y][threadIdx.x + i * TILE_SIZE] = B[(t * TILE_SIZE + threadIdx.y) * N + colIdx];
-            } else {
-                Bs[threadIdx.y][threadIdx.x + i * TILE_SIZE] = 0.0f; 
-            }
-        }
-
-        __syncthreads();
-
-        for (k = 0; k < TILE_SIZE; k++) {
-            for (i = 0; i < A_MULTIPLE; i++) {
-                for (j = 0; j < B_MULTIPLE; j++) {
-                    sums[i][j] += As[threadIdx.y * A_MULTIPLE + i][k] * Bs[k][threadIdx.x + j * TILE_SIZE];
-                }
-            }
-        }
-        
-        __syncthreads(); 
-    }
-
-    for (i = 0; i < A_MULTIPLE; i++) {
-        int rowIdx = row + i * TILE_SIZE; 
-        for (j = 0; j < B_MULTIPLE; j++) {
-            int colIdx = col + j * TILE_SIZE;
-            if (rowIdx < M && colIdx < N) {
-                C[batch_id * M * N + rowIdx * N + colIdx] = sums[i][j];
-            }
-        }
-    }
-}
-
-
-void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
-    // dim3 blockDim(TILE_SIZE, TILE_SIZE);
-    // dim3 gridDim((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch_size);
-
-    // batch_matmul_kernel_v2<<<gridDim, blockDim>>>(d_in1, d_in2, d_out, batch_size, M, K, N);
-
-    dim3 blockDim(TILE_SIZE, TILE_SIZE);
-    dim3 gridDim((N + TILE_SIZE * B_MULTIPLE - 1) / (TILE_SIZE * B_MULTIPLE), (M + TILE_SIZE * A_MULTIPLE - 1) / (TILE_SIZE * A_MULTIPLE), batch_size);
-
-    batch_matmul_kernel_v3<<<gridDim, blockDim>>>(d_in1, d_in2, d_out,  M, K, N);
+/* GELU
+ * @param  [in] x: input float value
+ * @return [ret] : GELU(x)
+ */
+__device__ inline float gelu_device(float x) {
+  constexpr float gelu_scale = 0.79788456080286535588f; // sqrtf(2.0f / MATH_PI)
+  float y = x + 0.044715f * x * x * x;
+  return 0.5f * x * (1.0f + tanh(gelu_scale * y));
 }
 
 /* Linear
@@ -268,1169 +194,295 @@ void batch_matmul_final(float *d_in1, float *d_in2, float *d_out, size_t batch_s
  * @param [in3]   b: [N]
  * @param [out] out: [M, N]
  */
-// void linear(Tensor *in, Tensor *w, Tensor *b, Tensor *out) {
-//   size_t M = in->shape[0];
-//   size_t K = in->shape[1];
-//   size_t N = w->shape[1];
+template <int BM, int BN, int BK, int RM, int RN, int splitK>
+__global__ void linear_kernel(float *in, float *w, float *b, float *out,
+                              int K, int lda, int ldb, int ldc, int ldab, int ldcb, bool gelu) {
+  constexpr int cTM = 4, cTN = 8;
+  constexpr int cWM = BM / RM / cTM, cWN = BN / RN / cTN;
+  constexpr int block_size = cWM * cWN * warp_size;
+  constexpr int nfloat = sizeof(float4) / sizeof(float);
 
-// #pragma omp parallel for
-//   for (size_t i = 0; i < M; i++) {
-//     for (size_t j = 0; j < N; j++) {
-//       out->buf[i * N + j] = 0;
-//       for (size_t k = 0; k < K; k++) {
-//         out->buf[i * N + j] += in->buf[i * K + k] * w->buf[k * N + j];
-//       }
-//       out->buf[i * N + j] += b->buf[j];
-//     }
-//   }
-// }
+  static_assert(cTM * cTN == warp_size);
+  static_assert(BM % (RM * cTM) == 0 && BN % (RN * cTN) == 0);
+  static_assert(block_size % BM == 0 && block_size % BN == 0 && block_size % BK == 0);
+  static_assert(RM % nfloat == 0 && RN % nfloat == 0);
 
-__global__ void linear_kernel(float *in, float *w, float *b, float *out, size_t M, size_t K, size_t N) {
-  size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-  size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+  __shared__ float sA1[BK * BM], sA2[BK * BM], sB1[BK * BN], sB2[BK * BN];
+  float rA[RM], rB[RN], rC[RM][RN];
 
-  if (row < M && col < N) {
-    float sum = 0;
-    for (size_t k = 0; k < K; k++) {
-      sum += in[row * K + k] * w[k * N + col];
-    }
-    out[row * N + col] = sum + b[col];
+  const int mid = threadIdx.x / cTN + threadIdx.y * cTM;
+  const int nid = threadIdx.x % cTN + threadIdx.z * cTN;
+  const int tid = threadIdx.x + (threadIdx.y + threadIdx.z * cWM) * warp_size;
+  const int klen = K / splitK;
+
+  in += blockIdx.x * BM * lda;
+  w += blockIdx.y * BN; b += blockIdx.y * BN;
+  out += blockIdx.x * BM * ldc + blockIdx.y * BN;
+  if (splitK > 1) {
+    in += blockIdx.z * klen;
+    w += blockIdx.z * klen * ldb;
+    out += blockIdx.z * ldcb;
+  } else {
+    in += blockIdx.z * ldab;
+    out += blockIdx.z * ldcb;
   }
-}
 
-void linear(Tensor *in, Tensor *w, Tensor *b, Tensor *out) {
-  size_t M = in->shape[0];
-  size_t K = in->shape[1];
-  size_t N = w->shape[1];
+  // load b to rC
+  #pragma unroll
+  for (int j = 0; j < RN / nfloat; j++) {
+    float4 tmp = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (splitK == 1 || blockIdx.z == 0)
+      tmp = ((float4 *)b)[j * (BN / RN) + nid];
+    #pragma unroll
+    for (int i = 0; i < RM; i++)
+      ((float4 *)(rC[i]))[j] = tmp;
+  }
 
-  float *d_in;
-  float *d_w;
-  float *d_b;
-  float *d_out;
+  // BK sized K-tile
+  float * __restrict__ sAw = sA1, * __restrict__ sAr = sA2;
+  float * __restrict__ sBw = sB1, * __restrict__ sBr = sB2;
 
-  cudaMalloc(&d_in, M * K * sizeof(float));
-  cudaMalloc(&d_w, K * N * sizeof(float));
-  cudaMalloc(&d_b, N * sizeof(float));
-  cudaMalloc(&d_out, M * N * sizeof(float));
+  #pragma unroll
+  for (int x = 0; x < BM * BK / block_size; x++) {
+    int ii = tid / BK + x * (block_size / BK);
+    int kk = tid % BK;
+    sAw[ii * BK + kk] = in[ii * lda + kk];
+  }
+  #pragma unroll
+  for (int y = 0; y < BN * BK / block_size; y++) {
+    int kk = tid / BN + y * (block_size / BN);
+    int jj = tid % BN;
+    sBw[kk * BN + jj] = w[kk * ldb + jj];
+  }
+  w += BK * ldb, in += BK;
 
-  cudaMemcpy(d_in, in->buf, M * K * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_w, w->buf, K * N * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_b, b->buf, N * sizeof(float), cudaMemcpyHostToDevice);
+  for (int k = BK; k < klen; k += BK, w += BK * ldb, in += BK) {
+    __syncthreads();
+    float * tmp = nullptr;
+    tmp = sAw; sAw = sAr; sAr = tmp;
+    tmp = sBw; sBw = sBr; sBr = tmp;
+    float sAreg[BK * BM / block_size], sBreg[BK * BN / block_size];
 
-  dim3 blockDim(16, 16);
-  dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y);
-
-  linear_kernel<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, M, K, N);
-
-  cudaMemcpy(out->buf, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_w);
-  cudaFree(d_b);
-  cudaFree(d_out);
-}
-
-void linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t M, size_t K, size_t N) {
-    dim3 blockDim(16, 16);
-    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y);
-    linear_kernel<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, M, K, N);
-}
-
-__global__ void batch_linear_kernel_v1(float *in, float *w, float *b, float *out, size_t batch_size, size_t M, size_t K, size_t N) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < batch_size * M * N) {
-        size_t batch_id = idx / (M * N);
-        size_t local_idx = idx % (M * N);
-        size_t row = local_idx / N;
-        size_t col = local_idx % N;
-
-        if (row < M && col < N) {
-            float sum = 0;
-            for (size_t k = 0; k < K; k++) {
-                sum += in[batch_id * M * K + row * K + k] * w[k * N + col];
-            }
-            out[batch_id * M * N + row * N + col] = sum + b[col];
-        }
+    #pragma unroll
+    for (int x = 0; x < BM * BK / block_size; x++) {
+      int ii = tid / BK + x * (block_size / BK);
+      int kk = tid % BK;
+      sAreg[x] = in[ii * lda + kk];
     }
-}
-
-__global__ void batch_linear_kernel_v2(float *A, float *B, float *C, float *D, size_t batch_size, size_t M, size_t K, size_t N) {
-    __shared__ float A_shared[TILE_SIZE][TILE_SIZE];
-    __shared__ float B_shared[TILE_SIZE][TILE_SIZE];
-
-    float sum = 0.0f;
-    size_t batch_id = blockIdx.z;
-    size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t col = blockIdx.x * blockDim.x + threadIdx.x;
-
-    for (size_t m = 0; m < (K + TILE_SIZE - 1) / TILE_SIZE; ++m) {
-        if (row < M && m * TILE_SIZE + threadIdx.x < K) {
-            A_shared[threadIdx.y][threadIdx.x] = A[batch_id * M * K + row * K + m * TILE_SIZE + threadIdx.x];
-        } else {
-            A_shared[threadIdx.y][threadIdx.x] = 0.0f;
-        }
-
-        if (m * TILE_SIZE + threadIdx.y < K && col < N) {
-            B_shared[threadIdx.y][threadIdx.x] = B[(m * TILE_SIZE + threadIdx.y) * N + col];
-        } else {
-            B_shared[threadIdx.y][threadIdx.x] = 0.0f;
-        }
-
-        __syncthreads();
-
-        for (size_t k = 0; k < TILE_SIZE; ++k) {
-            sum += A_shared[threadIdx.y][k] * B_shared[k][threadIdx.x];
-        }
-
-        __syncthreads();
+    #pragma unroll
+    for (int y = 0; y < BN * BK / block_size; y++) {
+      int kk = tid / BN + y * (block_size / BN);
+      int jj = tid % BN;
+      sBreg[y] = w[kk * ldb + jj];
     }
 
-    if (row < M && col < N) {
-        D[batch_id * M * N + row * N + col] = sum + C[col];
+    #pragma unroll
+    for (int kk = 0; kk < BK; kk++) {
+      #pragma unroll
+      for (int i = 0; i < RM; i++)
+        rA[i] = sAr[(i * (BM / RM) + mid) * BK + kk];
+      #pragma unroll
+      for (int j = 0; j < RN / nfloat; j++)
+        ((float4 *)rB)[j] = ((float4 *)(sBr + kk * BN))[j * (BN / RN) + nid];
+      #pragma unroll
+      for (int i = 0; i < RM; i++)
+        #pragma unroll
+        for (int j = 0; j < RN; j++)
+          rC[i][j] += rA[i] * rB[j];
     }
+
+    #pragma unroll
+    for (int x = 0; x < BM * BK / block_size; x++) {
+      int ii = tid / BK + x * (block_size / BK);
+      int kk = tid % BK;
+      sAw[ii * BK + kk] = sAreg[x];
+    }
+    #pragma unroll
+    for (int y = 0; y < BN * BK / block_size; y++) {
+      int kk = tid / BN + y * (block_size / BN);
+      int jj = tid % BN;
+      sBw[kk * BN + jj] = sBreg[y];
+    }
+  }
+
+  __syncthreads();
+  #pragma unroll
+  for (int kk = 0; kk < BK; kk++) {
+    #pragma unroll
+    for (int i = 0; i < RM; i++)
+      rA[i] = sAw[(i * (BM / RM) + mid) * BK + kk];
+    #pragma unroll
+    for (int j = 0; j < RN / nfloat; j++)
+      ((float4 *)rB)[j] = ((float4 *)(sBw + kk * BN))[j * (BN / RN) + nid];
+    #pragma unroll
+    for (int i = 0; i < RM; i++)
+      #pragma unroll
+      for (int j = 0; j < RN; j++)
+        rC[i][j] += rA[i] * rB[j];
+  }
+
+  if (gelu) {
+    #pragma unroll
+    for (int i = 0; i < RM; i++)
+      #pragma unroll
+      for (int j = 0; j < RN; j++)
+        rC[i][j] = gelu_device(rC[i][j]);
+  }
+
+  #pragma unroll
+  for (int i = 0; i < RM; i++)
+    #pragma unroll
+    for (int j = 0; j < RN / nfloat; j++)
+      ((float4 *)(out + (i * (BM / RM) + mid) * ldc))[j * (BN / RN) + nid] = ((float4 *)(rC[i]))[j];
 }
 
-__global__ void add_bias_kernel(float *D, float *C, size_t batch_size, size_t M, size_t N) {
-    size_t batch_id = blockIdx.z;
-    size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t col = blockIdx.x * blockDim.x + threadIdx.x;
+/* splitK_reduce
+ * @param [tmpl] splitK: the number of splits for K
+ * @param [in1] sum_out: [splitK, N]
+ * @param [out]     out: [N]
+ */
+template <int splitK>
+__global__ void splitK_reduce(float *sum_out, float *out, int ldin, int ldout) {
+  static_assert(splitK > 1);
+  const int xid = threadIdx.x + blockIdx.x * blockDim.x;
+  const int yid = blockIdx.y;
+  const int tid = yid * blockDim.x * gridDim.x + xid;
 
-    if (row < M && col < N) {
-        D[batch_id * M * N + row * N + col] += C[col];
-    }
+  float sum = 0.0f;
+  #pragma unroll
+  for (int i = 0; i < splitK; i++)
+    sum += sum_out[i * ldin + tid];
+  out[yid * ldout + xid] = sum;
 }
 
-// void batch_linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
-//     dim3 blockDim(TILE_SIZE, TILE_SIZE);
-//     dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
-//     batch_linear_kernel_v2<<<gridDim, blockDim>>>(d_in, d_w, d_b, d_out, batch_size, M, K, N);
-// }
+void linear(float *in, float *w, float *b, float *out,
+            int M, int N, int K, int lda, int ldb, int ldc,
+            int B, int ldab, int ldcb, float *sum_out, bool gelu) {
+  constexpr int BM = 64, BN = 128, BK = 8, RM = 8, RN = 8;
+  if (M % BM || N % BN || K % BK) {
+    fprintf(stderr, "Error: M, N, K must be a multiple\n");
+    exit(1);
+  }
+  if (B * M * N > 512 * 768 * 2) {
+    linear_kernel<BM, BN, BK, RM, RN, 1>
+      <<<dim3(M / BM, N / BN, B), dim3(warp_size, BM / RM / 4, BN / RN / 8)>>>
+      (in, w, b, out, K, lda, ldb, ldc, ldab, ldcb, gelu);
+  } else {
+    constexpr int splitK = 3;
+    if (B > 1) {
+      fprintf(stderr, "Error: B must be 1 when using splitK\n");
+      exit(1);
+    }
+    if (K % (BK * splitK)) {
+      fprintf(stderr, "Error: M, N, K must be a multiple\n");
+      exit(1);
+    }
+    if (sum_out == nullptr) {
+      fprintf(stderr, "Error: sum_out must be provided\n");
+      exit(1);
+    }
+    if (gelu) {
+      fprintf(stderr, "Error: gelu is not supported with splitK\n");
+      exit(1);
+    }
 
-int count = 0;
+    linear_kernel<BM, BN, BK, RM, RN, splitK>
+      <<<dim3(M / BM, N / BN, splitK), dim3(warp_size, BM / RM / 4, BN / RN / 8)>>>
+      (in, w, b, sum_out, K, lda, ldb, N, 0, M * N, false);
+    splitK_reduce<splitK>
+      <<<dim3(N / (warp_size * 4), M), warp_size * 4>>>
+      (sum_out, out, M * N, ldc);
+  }  
+}
 
-void batch_linear(float *d_in, float *d_w, float *d_b, float *d_out, size_t batch_size, size_t M, size_t K, size_t N) {
-    // dim3 blockDim(TILE_SIZE, TILE_SIZE);
-    // dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
+void linear(float *in, float *w, float *b, float *out,
+            int M, int N, int K, int lda, int ldb, int ldc, float *sum_out, bool gelu) {
+  linear(in, w, b, out, M, N, K, lda, ldb, ldc, 1, 0, 0, sum_out, gelu);
+}
 
-    // // TODO fusion later
-    // batch_matmul_kernel_v2<<<gridDim, blockDim>>>(d_in, d_w, d_out, batch_size, M, K, N);
-
-    dim3 blockDim(TILE_SIZE, TILE_SIZE);
-    dim3 gridDim((N + TILE_SIZE * B_MULTIPLE - 1) / (TILE_SIZE * B_MULTIPLE), (M + TILE_SIZE * A_MULTIPLE - 1) / (TILE_SIZE * A_MULTIPLE), batch_size);
-    batch_matmul_kernel_v3<<<gridDim, blockDim>>>(d_in, d_w, d_out,  M, K, N);
-  
-    dim3 blockDim2(TILE_SIZE, TILE_SIZE);
-    dim3 gridDim2((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
-    add_bias_kernel<<<gridDim2, blockDim2>>>(d_out, d_b, batch_size, M, N);
+void lm_head(float *in1, float *in2, float *out, int N, int L, int V, int H) {
+  linear(in1 + (L - 1) * H, in2, in2 + H * V, out, N, V, H, L * H, V, V, nullptr, false);
 }
 
 /* Token + Positional Embedding
- * @param [in1]  in: [s]
- * @param [in2] wte: [NUM_VOCAB, H]
+ * @param [in1]  in: [B, L]
+ * @param [in2] wte: [V, H]
  * @param [in3] wpe: [MAX_SEQ_LEN, H]
- * @param [out] out: [s, H]
- * 's' is the number of tokens in the prompt.
- * 'H' is the hidden dimension.
+ * @param [out] out: [B, L, H]
+ * @param [in4]   V: the number of vocabulary.
+ * @param [in5]   L: the number of tokens in the prompt.
+ * @param [in6]   H: the hidden dimension.
+ * @param [in7] pos: the position of the first token in the prompt.
  */
-__global__ void token_pos_embedding_kernel(int *in, float *wte, float *wpe, float *out, size_t s, size_t H) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
-  if (idx < s * H) {
-    size_t i = idx / H; 
-    size_t j = idx % H; 
-    out[idx] = wte[in[i] * H + j] + wpe[i * H + j]; 
+__global__ void token_pos_embedding_kernel(int *in, float *wte, float *wpe, float *out, int V, int L, int H, int pos) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  int j = blockIdx.y * blockDim.y + threadIdx.y;
+  int k = blockIdx.z;
+
+  out[(i * L + k) * H + j] = wte[j * V + in[i * L + k]] + wpe[(pos + k) * H + j];
+}
+void token_pos_embedding(int *in, float *wte, float *wpe, float *out, int B, int L, int H, int pos, int V) {
+  if (B % 32 && H % 32) {
+    fprintf(stderr, "Error: N and H must be a multiple of %d\n", 32);
+    exit(1);
   }
-}
-
-void token_pos_embedding(vector<int> in, Tensor *wte, Tensor *wpe, Tensor *out) {
-  size_t s = in.size(); 
-  size_t H = wte->shape[1]; 
-
-  int *d_in; 
-  float *d_wte; 
-  float *d_wpe; 
-  float *d_out; 
-
-  cudaMalloc(&d_in, s * sizeof(int));
-  cudaMalloc(&d_wte, wte->num_elem() * sizeof(float));
-  cudaMalloc(&d_wpe, wpe->num_elem() * sizeof(float)); 
-  cudaMalloc(&d_out, s * H * sizeof(float));
-
-  cudaMemcpy(d_in, in.data(), s * sizeof(int), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_wte, wte->buf, wte->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_wpe, wpe->buf, wpe->num_elem() * sizeof(float), cudaMemcpyHostToDevice); 
-
-  dim3 blockDim(256); 
-  dim3 gridDim((s * H + blockDim.x - 1) / blockDim.x); 
-  token_pos_embedding_kernel<<<gridDim, blockDim>>>(d_in, d_wte, d_wpe, d_out, s, H);
-
-  cudaMemcpy(out->buf, d_out, s * H * sizeof(float), cudaMemcpyDeviceToHost); 
-
-  cudaFree(d_in);
-  cudaFree(d_wte);
-  cudaFree(d_wpe);
-  cudaFree(d_out);
-}
-
-void token_pos_embedding(int *d_in, float *d_wte, float *d_wpe, float *d_out, size_t s, size_t H) {  
-  dim3 blockDim(256);
-  dim3 gridDim((s * H + blockDim.x - 1) / blockDim.x); 
-  token_pos_embedding_kernel<<<gridDim, blockDim>>>(d_in, d_wte, d_wpe, d_out, s, H);
-}
-
-__global__ void batch_token_pos_embedding_kernel(int *in, float *wte, float *wpe, float *out, size_t batch_size, size_t s, size_t H) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
-    if (idx < batch_size * s * H) {
-        size_t batch_id = idx / (s * H);
-        size_t local_idx = idx % (s * H);
-        size_t i = local_idx / H; 
-        size_t j = local_idx % H; 
-        out[idx] = wte[in[batch_id * s + i] * H + j] + wpe[i * H + j]; 
-    }
-}
-
-void batch_token_pos_embedding(int *d_in, float *d_wte, float *d_wpe, float *d_out, size_t batch_size, size_t s, size_t H) {
-    dim3 blockDim(256); 
-    dim3 gridDim((batch_size * s * H + blockDim.x - 1) / blockDim.x); 
-    batch_token_pos_embedding_kernel<<<gridDim, blockDim>>>(d_in, d_wte, d_wpe, d_out, batch_size, s, H);
-}
-
-/* GELU
- * @param [in & out] inout: [N]
- * 'N' is the number of elements in the tensor.
- */
-__global__ void gelu_kernel(float *inout, size_t N) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
-  
-  if (idx < N) {
-    float x = inout[idx]; 
-    inout[idx] = 
-        0.5 * x *
-        (1.f + tanh(sqrt(2.f / MATH_PI) * (x + 0.044715f * x * x * x)));
-  }
-}
-
-void gelu(Tensor *inout) {
-  size_t N = inout->num_elem(); 
-
-  float *d_inout;
-
-  cudaMalloc(&d_inout, N * sizeof(float));
-
-  cudaMemcpy(d_inout, inout->buf, N * sizeof(float), cudaMemcpyHostToDevice);
-
-  dim3 blockDim(256); 
-  dim3 gridDim((N + blockDim.x - 1) / blockDim.x); 
-  gelu_kernel<<<gridDim, blockDim>>>(d_inout, N);
-
-  cudaMemcpy(inout->buf, d_inout, N * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_inout);
-}
-
-void gelu(float *d_inout, size_t N) {
-    dim3 blockDim(256); 
-    dim3 gridDim((N + blockDim.x - 1) / blockDim.x); 
-    gelu_kernel<<<gridDim, blockDim>>>(d_inout, N);
-}
-
-__global__ void batch_gelu_kernel(float *inout, size_t N) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
-    if (idx < N) {
-        float x = inout[idx]; 
-        inout[idx] = 
-            0.5 * x *
-            (1.f + tanh(sqrt(2.f / MATH_PI) * (x + 0.044715f * x * x * x)));
-    }
-}
-
-void batch_gelu(float *d_inout, size_t batch_size, size_t N) {
-    size_t total_N = batch_size * N;
-    dim3 blockDim(256); 
-    dim3 gridDim((total_N + blockDim.x - 1) / blockDim.x); 
-    batch_gelu_kernel<<<gridDim, blockDim>>>(d_inout, total_N);
-}
-
-/* Softmax (w/ Max Trick)
- * @param [in & out] inout: [s, H]
- * 's' is the number of tokens in the prompt.
- * 'H' is the hidden dimension.
- */
-__global__ void softmax_kernel(float *inout, size_t s, size_t V) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  
-  if (idx < s) {
-    float max_val = -INFINITY;
-    for (size_t j = 0; j < V; j++) {
-      max_val = fmaxf(max_val, inout[idx * V + j]);
-    }
-
-    float sum_exp = 0.0f;
-    for (size_t j = 0; j < V; j++) {
-      sum_exp += expf(inout[idx * V + j] - max_val);
-    }
-
-    for (size_t j = 0; j < V; j++) {
-      inout[idx * V + j] = expf(inout[idx * V + j] - max_val) / sum_exp;
-    }
-  }
-}
-
-void softmax(Tensor *inout) {
-  size_t s = inout->shape[0];
-  size_t V = inout->shape[1];
-
-  float *d_inout;
-
-  cudaMalloc(&d_inout, s * V * sizeof(float));
-
-  cudaMemcpy(d_inout, inout->buf, s * V * sizeof(float), cudaMemcpyHostToDevice);
-
-  dim3 blockDim(256);
-  dim3 gridDim((s + blockDim.x - 1) / blockDim.x);
-  softmax_kernel<<<gridDim, blockDim>>>(d_inout, s, V);
-
-  cudaMemcpy(inout->buf, d_inout, s * V * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_inout);
-}
-
-void softmax(float *d_inout, size_t s, size_t V) {
-    dim3 blockDim(256);
-    dim3 gridDim((s + blockDim.x - 1) / blockDim.x);
-    softmax_kernel<<<gridDim, blockDim>>>(d_inout, s, V);
-}
-
-__global__ void batch_softmax_kernel(float *inout, size_t batch_size, size_t s, size_t V) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < batch_size * s) {
-        size_t batch_id = idx / s;
-        size_t token_id = idx % s;
-        float max_val = -INFINITY;
-        for (size_t j = 0; j < V; j++) {
-            max_val = fmaxf(max_val, inout[(batch_id * s + token_id) * V + j]);
-        }
-
-        float sum_exp = 0.0f;
-        for (size_t j = 0; j < V; j++) {
-            sum_exp += expf(inout[(batch_id * s + token_id) * V + j] - max_val);
-        }
-
-        for (size_t j = 0; j < V; j++) {
-            inout[(batch_id * s + token_id) * V + j] = expf(inout[(batch_id * s + token_id) * V + j] - max_val) / sum_exp;
-        }
-    }
-}
-
-void batch_softmax(float *d_inout, size_t batch_size, size_t s, size_t V) {
-    dim3 blockDim(256);
-    dim3 gridDim((batch_size * s + blockDim.x - 1) / blockDim.x);
-    batch_softmax_kernel<<<gridDim, blockDim>>>(d_inout, batch_size, s, V);
-}
-
-/* Layer Normalization
- * @param [in1 & out] inout: [s, H]
- * @param [in2]       gamma: [H]
- * @param [in3]        beta: [H]
- * 's' is the number of tokens in the prompt.
- * 'H' is the hidden dimension.
- */
-__global__ void layer_norm_kernel(float *inout, float *gamma, float *beta, size_t s, size_t H, float eps) {
-  size_t i = blockIdx.x * blockDim.x + threadIdx.x;
-  
-  if (i < s) {
-    float mean = 0;
-    float var = 0;
-
-    for (size_t j = 0; j < H; j++) {
-      mean += inout[i * H + j];
-      var += inout[i * H + j] * inout[i * H + j];
-    }
-    mean /= H;
-    var = var / H - mean * mean;
-
-    for (size_t j = 0; j < H; j++) {
-      inout[i * H + j] = (inout[i * H + j] - mean) * (1.0 / sqrtf(var + eps)) * gamma[j] + beta[j];
-    }
-  }
-}
-
-void layer_norm(Tensor *inout, Tensor *gamma, Tensor *beta) {
-  size_t s = inout->shape[0];
-  size_t H = inout->shape[1];
-
-  float eps = 1e-5;
-  float *d_inout;
-  float *d_gamma;
-  float *d_beta;
-
-  cudaMalloc(&d_inout, s * H * sizeof(float));
-  cudaMalloc(&d_gamma, H * sizeof(float));
-  cudaMalloc(&d_beta, H * sizeof(float));
-
-  cudaMemcpy(d_inout, inout->buf, s * H * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_gamma, gamma->buf, H * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_beta, beta->buf, H * sizeof(float), cudaMemcpyHostToDevice);
-
-  dim3 blockDim(256);
-  dim3 gridDim((s + blockDim.x - 1) / blockDim.x);
-  layer_norm_kernel<<<gridDim, blockDim>>>(d_inout, d_gamma, d_beta, s, H, eps);
-
-  cudaMemcpy(inout->buf, d_inout, s * H * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_inout);
-  cudaFree(d_gamma);
-  cudaFree(d_beta);
-}
-
-void layer_norm(float *d_inout, float *d_gamma, float *d_beta, size_t s, size_t H, float eps) {
-    dim3 blockDim(256);
-    dim3 gridDim((s + blockDim.x - 1) / blockDim.x);
-    layer_norm_kernel<<<gridDim, blockDim>>>(d_inout, d_gamma, d_beta, s, H, eps);
-}
-
-__global__ void batch_layer_norm_kernel(float *inout, float *gamma, float *beta, size_t batch_size, size_t s, size_t H, float eps) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < batch_size * s) {
-        size_t batch_id = idx / s;
-        size_t token_id = idx % s;
-        float mean = 0;
-        float var = 0;
-
-        for (size_t j = 0; j < H; j++) {
-            mean += inout[(batch_id * s + token_id) * H + j];
-            var += inout[(batch_id * s + token_id) * H + j] * inout[(batch_id * s + token_id) * H + j];
-        }
-        mean /= H;
-        var = var / H - mean * mean;
-
-        for (size_t j = 0; j < H; j++) {
-            inout[(batch_id * s + token_id) * H + j] = (inout[(batch_id * s + token_id) * H + j] - mean) * (1.0 / sqrtf(var + eps)) * gamma[j] + beta[j];
-        }
-    }
-}
-
-void batch_layer_norm(float *d_inout, float *d_gamma, float *d_beta, size_t batch_size, size_t s, size_t H, float eps) {
-    dim3 blockDim(256);
-    dim3 gridDim((batch_size * s + blockDim.x - 1) / blockDim.x);
-    batch_layer_norm_kernel<<<gridDim, blockDim>>>(d_inout, d_gamma, d_beta, batch_size, s, H, eps);
-}
-
-/* Transpose
- * @param [in1]  in: [M, N]
- * @param [out] out: [N, M]
- */
-__global__ void transpose_kernel(float *in, float *out, size_t M, size_t N) {
-  size_t row = blockIdx.y * blockDim.y + threadIdx.y; 
-  size_t col = blockIdx.x * blockDim.x + threadIdx.x; 
-  
-  if (row < M && col < N) {
-    out[col * M + row] = in[row * N + col];
-  }
-}
-
-void transpose(Tensor *in, Tensor *out) {
-  size_t M = in->shape[0];
-  size_t N = in->shape[1]; 
-
-  float *d_in;
-  float *d_out;
-
-  cudaMalloc(&d_in, M * N * sizeof(float));
-  cudaMalloc(&d_out, N * M * sizeof(float));
-
-  cudaMemcpy(d_in, in->buf, M * N * sizeof(float), cudaMemcpyHostToDevice);
-
-  dim3 blockDim(16, 16);
-  dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim. y - 1) / blockDim.y);
-  transpose_kernel<<<gridDim, blockDim>>>(d_in, d_out, M, N); 
-
-  cudaMemcpy(out->buf, d_out, M * N * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_out);
-}
-
-void transpose(float *d_in, float *d_out, size_t M, size_t N) {
-    dim3 blockDim(16, 16);
-    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y);
-    transpose_kernel<<<gridDim, blockDim>>>(d_in, d_out, M, N); 
-}
-
-__global__ void batch_transpose_kernel(float *in, float *out, size_t batch_size, size_t M, size_t N) {
-    size_t batch_id = blockIdx.z;
-    size_t row = blockIdx.y * blockDim.y + threadIdx.y; 
-    size_t col = blockIdx.x * blockDim.x + threadIdx.x; 
-
-    if (row < M && col < N) {
-        out[batch_id * N * M + col * M + row] = in[batch_id * M * N + row * N + col];
-    }
-}
-
-void batch_transpose(float *d_in, float *d_out, size_t batch_size, size_t M, size_t N) {
-    dim3 blockDim(16, 16);
-    dim3 gridDim((N + blockDim.x - 1) / blockDim.x, (M + blockDim.y - 1) / blockDim.y, batch_size);
-    batch_transpose_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, M, N);
-}
-
-/* Scaling
- * @param [in1 & out] inout: [N]
- * @param [in2]       scale: [1]
- * 'N' is the number of elements in the tensor.
- */
-__global__ void scaling_kernel(float *inout, float scale, size_t N) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
-
-  if (idx < N) {
-    inout[idx] *= scale; 
-  }
-}
-
-void scaling(Tensor *inout, float scale) {
-  size_t N = inout->num_elem();
-
-  float *d_inout; 
-
-  cudaMalloc(&d_inout, N * sizeof(float));
-
-  cudaMemcpy(d_inout, inout->buf, N * sizeof(float), cudaMemcpyHostToDevice);
-
-  dim3 blockDim(256);
-  dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
-  scaling_kernel<<<gridDim, blockDim>>>(d_inout, scale, N); 
-
-  cudaMemcpy(inout->buf, d_inout, N * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_inout); 
-}
-
-void scaling(float *d_inout, float scale, size_t N) {
-    dim3 blockDim(256);
-    dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
-    scaling_kernel<<<gridDim, blockDim>>>(d_inout, scale, N); 
-}
-
-__global__ void batch_scaling_kernel(float *inout, float scale, size_t batch_size, size_t N) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
-
-    if (idx < batch_size * N) {
-        inout[idx] *= scale; 
-    }
-}
-
-void batch_scaling(float *d_inout, float scale, size_t batch_size, size_t N) {
-    dim3 blockDim(256);
-    dim3 gridDim((batch_size * N + blockDim.x - 1) / blockDim.x);
-    batch_scaling_kernel<<<gridDim, blockDim>>>(d_inout, scale, batch_size, N); 
-}
-
-/* Generate mask
- * @param [in & out] inout: [s, s]
- * 's' is the number of tokens in the prompt.
- */
-__global__ void generate_mask_kernel(float *inout, size_t s) {
-  size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-  size_t col = blockIdx.x * blockDim.x + threadIdx.x;
-
-  if (row < s && col < s) {
-    if (row >= col) {
-      inout[row * s + col] = 0;
-    } else {
-      inout[row * s + col] = -1e10;
-    }
-  }
-}
-
-void generate_mask(Tensor *inout) {
-  size_t s = inout->shape[0];
-
-  float *d_inout;
-
-  cudaMalloc(&d_inout, s * s * sizeof(float));
-
-  cudaMemcpy(d_inout, inout->buf, s * s * sizeof(float), cudaMemcpyHostToDevice);
-
-  dim3 blockDim(16, 16);
-  dim3 gridDim((s + blockDim.x - 1) / blockDim.x, (s + blockDim.y - 1) / blockDim.y);
-  generate_mask_kernel<<<gridDim, blockDim>>>(d_inout, s);
-
-  cudaMemcpy(inout->buf, d_inout, s * s * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_inout);
-}
-
-void generate_mask(float *d_inout, size_t s) {
-    dim3 blockDim(16, 16);
-    dim3 gridDim((s + blockDim.x - 1) / blockDim.x, (s + blockDim.y - 1) / blockDim.y);
-    generate_mask_kernel<<<gridDim, blockDim>>>(d_inout, s);
-}
-
-__global__ void batch_generate_mask_kernel(float *inout, size_t batch_size, size_t s) {
-    size_t batch_id = blockIdx.z;
-    size_t row = blockIdx.y * blockDim.y + threadIdx.y;
-    size_t col = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (row < s && col < s) {
-        if (row >= col) {
-            inout[batch_id * s * s + row * s + col] = 0;
-        } else {
-            inout[batch_id * s * s + row * s + col] = -1e10;
-        }
-    }
-}
-
-void batch_generate_mask(float *d_inout, size_t batch_size, size_t s) {
-    dim3 blockDim(16, 16);
-    dim3 gridDim((s + blockDim.x - 1) / blockDim.x, (s + blockDim.y - 1) / blockDim.y, batch_size);
-    batch_generate_mask_kernel<<<gridDim, blockDim>>>(d_inout, batch_size, s);
-}
-
-/* Copy
- * @param [in1]  in: [N]
- * @param [out] out: [N]
- * 'N' is the number of elements in the tensor.
- */
-__global__ void copy_kernel(float *in, float *out, size_t N) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
-
-  if (idx < N) {
-    out[idx] = in[idx];
-  }
-}
-
-void copy(Tensor *in, Tensor *out) {
-  size_t N = in->num_elem(); 
-
-  float *d_in;
-  float *d_out; 
-
-  cudaMalloc(&d_in, N * sizeof(float));
-  cudaMalloc(&d_out, N * sizeof(float)); 
-
-  cudaMemcpy(d_in, in->buf, N * sizeof(float), cudaMemcpyHostToDevice);
-
-  dim3 blockDim(256);
-  dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
-  copy_kernel<<<gridDim, blockDim>>>(d_in, d_out, N);
-
-  cudaMemcpy(out->buf, d_out, N * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_out); 
-}
-
-void copy(float *d_in, float *d_out, size_t N) {
-    dim3 blockDim(256);
-    dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
-    copy_kernel<<<gridDim, blockDim>>>(d_in, d_out, N);
-}
-
-__global__ void batch_copy_kernel(float *in, float *out, size_t batch_size, size_t N) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
-
-    if (idx < batch_size * N) {
-        out[idx] = in[idx];
-    }
-}
-
-void batch_copy(float *d_in, float *d_out, size_t batch_size, size_t N) {
-    dim3 blockDim(256);
-    dim3 gridDim((batch_size * N + blockDim.x - 1) / blockDim.x);
-    batch_copy_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, N);
+  token_pos_embedding_kernel<<<dim3(B / 32, H / 32, L), dim3(32, 32)>>>(in, wte, wpe, out, V, L, H, pos);
 }
 
 /* Add
  * @param [in1 & out] inout: [N]
  * @param [in2]           x: [N]
- * 'N' is the number of elements in the tensor.
+ * @param [in3]           N: the number of elements in the tensor.
  */
-__global__ void add_kernel(float *inout, float *x, size_t N) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < N) { inout[idx] += x[idx]; }
+__global__ void add_kernel(float *inout, float *x, int N) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  inout[i] += x[i];
 }
-
-void add(Tensor *inout, Tensor *x) {
-  size_t N = inout->num_elem();
-
-  float *d_inout;
-  float *d_x;
-
-  cudaMalloc(&d_inout, N * sizeof(float));
-  cudaMalloc(&d_x, N * sizeof(float));
-
-  cudaMemcpy(d_inout, inout->buf, N * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_x, x->buf, N * sizeof(float), cudaMemcpyHostToDevice);
-
-  add_kernel<<<(N + 255) / 256, 256>>>(d_inout, d_x, N);
-
-  cudaMemcpy(inout->buf, d_inout, N * sizeof(float), cudaMemcpyDeviceToHost);
-}
-
-void add(float *d_inout, float *d_x, size_t N) {
-    dim3 blockDim(256);
-    dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
-    add_kernel<<<gridDim, blockDim>>>(d_inout, d_x, N);
-}
-
-__global__ void batch_add_kernel(float *inout, float *x, size_t batch_size, size_t N) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < batch_size * N) { 
-        inout[idx] += x[idx]; 
-    }
-}
-
-void batch_add(float *d_inout, float *d_x, size_t batch_size, size_t N) {
-    dim3 blockDim(256);
-    dim3 gridDim((batch_size * N + blockDim.x - 1) / blockDim.x);
-    batch_add_kernel<<<gridDim, blockDim>>>(d_inout, d_x, batch_size, N);
-}
-
-/* Split into QKV
- * @param [in1]  in: [s, H]
- * @param [out] out: [3, s, H/3]
- */
-__global__ void split_qkv_kernel(float *in, float *out, size_t s, size_t H, size_t N) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-  if (idx < N) {
-    size_t i = idx / (s * (H / 3));
-    size_t j = (idx % (s * (H / 3))) / (H / 3);
-    size_t k = idx % (H / 3);
-
-    out[idx] = in[i * (H / 3) + j * H + k];
+void add(float *inout, float *x, int N) {
+  constexpr int BN = 128;
+  if (N % BN) {
+    fprintf(stderr, "Error: N must be a multiple of %d\n", BN);
+    exit(1);
   }
-}
-
-void split_qkv(Tensor *in, Tensor *out) {
-  size_t s = in->shape[0];
-  size_t H = in->shape[1];
-  size_t N = 3 * s * (H / 3);
-
-  float *d_in;
-  float *d_out;
-
-  cudaMalloc(&d_in, s * H * sizeof(float));
-  cudaMalloc(&d_out, s * H * sizeof(float));
-
-  cudaMemcpy(d_in, in->buf, s * H * sizeof(float), cudaMemcpyHostToDevice);
-
-  dim3 blockDim(256);
-  dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
-  split_qkv_kernel<<<gridDim, blockDim>>>(d_in, d_out, s, H, N);
-
-  cudaMemcpy(out->buf, d_out, s * H * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_out);
-}
-
-void split_qkv(float *d_in, float *d_out, size_t s, size_t H) {
-    dim3 blockDim(256);
-    dim3 gridDim((s * H + blockDim.x - 1) / blockDim.x);
-    split_qkv_kernel<<<gridDim, blockDim>>>(d_in, d_out, s, H, s * H);
-}
-
-__global__ void batch_split_qkv_kernel(float *in, float *out, size_t batch_size, size_t s, size_t H, size_t N) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (idx < batch_size * N) {
-        size_t batch_id = idx / N;
-        size_t local_idx = idx % N;
-        size_t i = local_idx / (s * (H / 3));
-        size_t j = (local_idx % (s * (H / 3))) / (H / 3);
-        size_t k = local_idx % (H / 3);
-
-        out[idx] = in[batch_id * s * H + i * (H / 3) + j * H + k];
-    }
-}
-
-void batch_split_qkv(float *d_in, float *d_out, size_t batch_size, size_t s, size_t H) {
-    size_t N = 3 * s * (H / 3);
-    dim3 blockDim(256);
-    dim3 gridDim((batch_size * N + blockDim.x - 1) / blockDim.x);
-    batch_split_qkv_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, s, H, N);
-}
-
-/* Split into heads
- * @param [in1]  in: [3, s, H]
- * @param [out] out: [3, n_head, s, H/n_head]
- * 's' is the number of tokens in the prompt.
- * 'H' is the hidden dimension.
- * 'n_head' is the number of heads.
- */
-__global__ void split_head_kernel(float *in, float *out, size_t n_head, size_t s, size_t H, size_t N) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-  if (idx < N) {
-    size_t i = idx / (n_head * s * (H / n_head));
-    size_t j = (idx % (n_head * s * (H / n_head))) / (s * (H / n_head));
-    size_t k = (idx % (s * (H / n_head))) / (H / n_head);
-    size_t l = idx % (H / n_head);
-
-    out[idx] = in[i * s * H + k * H + j * (H / n_head) + l];
-  }
-}
-
-void split_head(Tensor *in, size_t n_head, Tensor *out) {
-  size_t s = in->shape[1];
-  size_t H = in->shape[2];
-  size_t N = 3 * n_head * s * (H / n_head);
-
-  float *d_in;
-  float *d_out;
-
-  cudaMalloc(&d_in, 3 * s * H * sizeof(float));
-  cudaMalloc(&d_out, 3 * n_head * s * (H / n_head) * sizeof(float));
-
-  cudaMemcpy(d_in, in->buf, 3 * s * H * sizeof(float), cudaMemcpyHostToDevice);
-
-  dim3 blockDim(256);
-  dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
-  split_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, n_head, s, H, N);
-
-  cudaMemcpy(out->buf, d_out, 3 * n_head * s * (H / n_head) * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_out);
-}
-
-void split_head(float *d_in, float *d_out, size_t n_head, size_t s, size_t H) {
-    dim3 blockDim(256);
-    dim3 gridDim((3 * s * H + blockDim.x - 1) / blockDim.x);
-    split_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, n_head, s, H, 3 * s * H);
-}
-
-__global__ void batch_split_head_kernel(float *in, float *out, size_t batch_size, size_t n_head, size_t s, size_t H, size_t N) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (idx < batch_size * N) {
-        size_t batch_id = idx / N;
-        size_t local_idx = idx % N;
-        size_t i = local_idx / (n_head * s * (H / n_head));
-        size_t j = (local_idx % (n_head * s * (H / n_head))) / (s * (H / n_head));
-        size_t k = (local_idx % (s * (H / n_head))) / (H / n_head);
-        size_t l = local_idx % (H / n_head);
-
-        out[idx] = in[batch_id * 3 * s * H + i * s * H + k * H + j * (H / n_head) + l];
-    }
-}
-
-void batch_split_head(float *d_in, float *d_out, size_t batch_size, size_t n_head, size_t s, size_t H) {
-    size_t N = 3 * n_head * s * (H / n_head);
-    dim3 blockDim(256);
-    dim3 gridDim((batch_size * N + blockDim.x - 1) / blockDim.x);
-    batch_split_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, n_head, s, H, N);
-}
-
-/* Extract Q, K, V from QKV head
- * @param [in1]       in: [3, n_head, s, H_]
- * @param [in2] head_idx: [1]
- * @param [in3]   n_head: [1]
- * @param [out]        q: [s, H_]
- * @param [out]        k: [s, H_]
- * @param [out]        v: [s, H_]
- * 's' is the number of tokens in the prompt.
- * 'H_' is the hidden dimension/n_head.
- * 'n_head' is the number of heads.
- */
-__global__ void extract_qkv_kernel(float *in, size_t head_idx, size_t n_head, float *q, float *k, float *v, size_t s, size_t H_, size_t N) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-  if (idx < N) {
-    size_t i = idx / H_;
-    size_t j = idx % H_;
-
-    q[i * H_ + j] = in[0 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
-    k[i * H_ + j] = in[1 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
-    v[i * H_ + j] = in[2 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
-  }
-}
-
-void extract_qkv(Tensor *in, size_t head_idx, size_t n_head, Tensor *q, Tensor *k, Tensor *v) {
-  size_t s = in->shape[2];
-  size_t H_ = in->shape[3];
-  size_t N = s * H_;
-
-  float *d_in;
-  float *d_q;
-  float *d_k;
-  float *d_v;
-
-  cudaMalloc(&d_in, 3 * n_head * s * H_ * sizeof(float));
-  cudaMalloc(&d_q, s * H_ * sizeof(float));
-  cudaMalloc(&d_k, s * H_ * sizeof(float));
-  cudaMalloc(&d_v, s * H_ * sizeof(float));
-
-  cudaMemcpy(d_in, in->buf, 3 * n_head * s * H_ * sizeof(float), cudaMemcpyHostToDevice);
-
-  dim3 blockDim(256);
-  dim3 gridDim((N + blockDim.x - 1) / blockDim.x);
-  extract_qkv_kernel<<<gridDim, blockDim>>>(d_in, head_idx, n_head, d_q, d_k, d_v, s, H_, N);
-
-  cudaMemcpy(q->buf, d_q, s * H_ * sizeof(float), cudaMemcpyDeviceToHost);
-  cudaMemcpy(k->buf, d_k, s * H_ * sizeof(float), cudaMemcpyDeviceToHost);
-  cudaMemcpy(v->buf, d_v, s * H_ * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_q);
-  cudaFree(d_k);
-  cudaFree(d_v);
-}
-
-void extract_qkv(float *d_in, float *d_q, float *d_k, float *d_v, size_t head_idx, size_t n_head, size_t s, size_t H_) {
-    dim3 blockDim(256);
-    dim3 gridDim((s * H_ + blockDim.x - 1) / blockDim.x);
-    extract_qkv_kernel<<<gridDim, blockDim>>>(d_in, head_idx, n_head, d_q, d_k, d_v, s, H_, s * H_);
-}
-
-__global__ void batch_extract_qkv_kernel(float *in, size_t head_idx, size_t n_head, float *q, float *k, float *v, size_t batch_size, size_t s, size_t H_, size_t N) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (idx < batch_size * N) {
-        size_t batch_id = idx / N;
-        size_t local_idx = idx % N;
-        size_t i = local_idx / H_;
-        size_t j = local_idx % H_;
-
-        q[batch_id * s * H_ + i * H_ + j] = in[batch_id * 3 * n_head * s * H_ + 0 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
-        k[batch_id * s * H_ + i * H_ + j] = in[batch_id * 3 * n_head * s * H_ + 1 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
-        v[batch_id * s * H_ + i * H_ + j] = in[batch_id * 3 * n_head * s * H_ + 2 * n_head * s * H_ + head_idx * s * H_ + i * H_ + j];
-    }
-}
-
-void batch_extract_qkv(float *d_in, float *d_q, float *d_k, float *d_v, size_t batch_size, size_t head_idx, size_t n_head, size_t s, size_t H_) {
-    size_t N = s * H_;
-    dim3 blockDim(256);
-    dim3 gridDim((batch_size * N + blockDim.x - 1) / blockDim.x);
-    batch_extract_qkv_kernel<<<gridDim, blockDim>>>(d_in, head_idx, n_head, d_q, d_k, d_v, batch_size, s, H_, N);
-}
-
-__global__ void batch_head_extract_qkv_kernel(float *in, size_t n_head, float *q, float *k, float *v, size_t batch_size, size_t s, size_t H_, size_t N) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (idx < batch_size * n_head * N) {
-        size_t head_id = (idx / N) % n_head;
-        size_t batch_id = idx / (n_head * N);
-        size_t local_idx = idx % N;
-        size_t i = local_idx / H_;
-        size_t j = local_idx % H_;
-
-        q[batch_id * n_head * s * H_ + head_id * s * H_ + i * H_ + j] = in[batch_id * 3 * n_head * s * H_ + 0 * n_head * s * H_ + head_id * s * H_ + i * H_ + j];
-        k[batch_id * n_head * s * H_ + head_id * s * H_ + i * H_ + j] = in[batch_id * 3 * n_head * s * H_ + 1 * n_head * s * H_ + head_id * s * H_ + i * H_ + j];
-        v[batch_id * n_head * s * H_ + head_id * s * H_ + i * H_ + j] = in[batch_id * 3 * n_head * s * H_ + 2 * n_head * s * H_ + head_id * s * H_ + i * H_ + j];
-    }
-}
-
-void batch_head_extract_qkv(float *d_in, float *d_q, float *d_k, float *d_v, size_t batch_size, size_t n_head, size_t s, size_t H_) {
-    size_t N = s * H_;
-    dim3 blockDim(256);
-    dim3 gridDim((batch_size * n_head * N + blockDim.x - 1) / blockDim.x);
-    batch_head_extract_qkv_kernel<<<gridDim, blockDim>>>(d_in, n_head, d_q, d_k, d_v, batch_size, s, H_, N);
-}
-
-/* Merge each heads
- * @param [in1]       in: [s, H_]
- * @param [in2] head_idx: [1]
- * @param [in3]   n_head: [1]
- * @param [out]      out: [n_head, s, H_]
- * 's' is the number of tokens in the prompt.
- * 'H_' is the hidden dimension/n_head.
- * 'n_head' is the number of heads.
- */
-__global__ void merge_head_kernel(float *in, size_t head_idx, size_t s, size_t H_, float *out) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-  if (idx < s * H_) {
-    size_t i = idx / H_;
-    size_t j = idx % H_;
-    out[head_idx * s * H_ + i * H_ + j] = in[idx];
-  }
-}
-
-void merge_head(Tensor *in, size_t head_idx, size_t n_head, Tensor *out) {
-  size_t s = in->shape[0];
-  size_t H_ = in->shape[1];
-
-  float *d_in;
-  float *d_out;
-
-  cudaMalloc(&d_in, s * H_ * sizeof(float));
-  cudaMalloc(&d_out, n_head * s * H_ * sizeof(float));  
-
-  cudaMemcpy(d_in, in->buf, s * H_ * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_out, out->buf, n_head * s * H_ * sizeof(float), cudaMemcpyHostToDevice);  
-
-  dim3 blockDim(256);
-  dim3 gridDim((s * H_ + blockDim.x - 1) / blockDim.x);
-  merge_head_kernel<<<gridDim, blockDim>>>(d_in, head_idx, s, H_, d_out);
-
-  cudaMemcpy(out->buf, d_out, n_head * s * H_ * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_out);
-}
-
-void merge_head(float *d_in, float *d_out, size_t head_idx, size_t s, size_t H_) {
-    dim3 blockDim(256);
-    dim3 gridDim((s * H_ + blockDim.x - 1) / blockDim.x);
-    merge_head_kernel<<<gridDim, blockDim>>>(d_in, head_idx, s, H_, d_out);
-}
-
-__global__ void batch_merge_head_kernel(float *in, size_t head_idx, size_t n_head, size_t batch_size, size_t s, size_t H_, float *out) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (idx < batch_size * s * H_) {
-        size_t batch_id = idx / (s * H_);
-        size_t local_idx = idx % (s * H_);
-        size_t i = local_idx / H_;
-        size_t j = local_idx % H_;
-
-        out[batch_id * n_head * s * H_ + head_idx * s * H_ + i * H_ + j] = in[idx];
-    }
-}
-
-void batch_merge_head(float *d_in, float *d_out, size_t batch_size, size_t n_head, size_t head_idx, size_t s, size_t H_) {
-    dim3 blockDim(256);
-    dim3 gridDim((batch_size * s * H_ + blockDim.x - 1) / blockDim.x);
-    batch_merge_head_kernel<<<gridDim, blockDim>>>(d_in, head_idx, n_head, batch_size, s, H_, d_out);
-}
-
-/* Concatenate each heads
- * @param [in1]     in: [n_head, s, H_]
- * @param [out]    out: [s, H_*n_head]
- * 'n_head' is the number of heads.
- * 's' is the number of tokens in the prompt.
- * 'H_' is the hidden dimension/n_head.
- */
-__global__ void concat_head_kernel(float *in, float *out, size_t n_head, size_t s, size_t H_) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
-
-  if (idx < s * H_ * n_head) {
-    size_t i = (idx % (s * H_)) / H_; 
-    size_t j = idx / (s * H_); 
-    size_t k = idx % H_; 
-    out[i * n_head * H_ + j * H_ + k] = in[j * s * H_ + i * H_ + k];
-  }
-}
-
-void concat_head(Tensor *in, Tensor *out) {
-  size_t n_head = in->shape[0];
-  size_t s = in->shape[1]; 
-  size_t H_ = in->shape[2]; 
-
-  float *d_in; 
-  float *d_out; 
-
-  cudaMalloc(&d_in, n_head * s * H_ * sizeof(float));
-  cudaMalloc(&d_out, s * H_ * n_head * sizeof(float));
-
-  cudaMemcpy(d_in, in->buf, n_head * s * H_ * sizeof(float), cudaMemcpyHostToDevice);
-
-  dim3 blockDim(256);
-  dim3 gridDim((n_head * s * H_ + blockDim.x - 1) / blockDim.x);
-  concat_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, n_head, s, H_);
-
-  cudaMemcpy(out->buf, d_out, s * n_head * H_ * sizeof(float), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_out);
-}
-
-void concat_head(float *d_in, float *d_out, size_t n_head, size_t s, size_t H_) {
-    dim3 blockDim(256);
-    dim3 gridDim((n_head * s * H_ + blockDim.x - 1) / blockDim.x);
-    concat_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, n_head, s, H_);
-}
-
-__global__ void batch_concat_head_kernel(float *in, float *out, size_t batch_size, size_t n_head, size_t s, size_t H_) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
-
-    if (idx < batch_size * s * H_ * n_head) {
-        size_t batch_id = idx / (s * H_ * n_head);
-        size_t local_idx = idx % (s * H_ * n_head);
-        size_t i = (local_idx % (s * H_)) / H_; 
-        size_t j = local_idx / (s * H_); 
-        size_t k = local_idx % H_; 
-
-        out[batch_id * s * H_ * n_head + i * n_head * H_ + j * H_ + k] = in[batch_id * n_head * s * H_ + j * s * H_ + i * H_ + k];
-    }
-}
-
-void batch_concat_head(float *d_in, float *d_out, size_t batch_size, size_t n_head, size_t s, size_t H_) {
-    dim3 blockDim(256);
-    dim3 gridDim((batch_size * n_head * s * H_ + blockDim.x - 1) / blockDim.x);
-    batch_concat_head_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, n_head, s, H_);
+  add_kernel<<<N / BN, BN>>>(inout, x, N);
 }
 
 /* Greedy Max Sampling
- * @param  [in1]  in: [s, V]
- * @return [ret] out: [1]
- * 's' is the number of tokens in the prompt.
- * 'V' is the number of vocabulary.
+ * @param [in1]   in: [B, V]
+ * @param [out]  out: [B]
+ * @param [in2]    V: the number of vocabulary.
  */
-__global__ void top1_sampling_kernel(float *in, int *out, size_t V) {
-  if (threadIdx.x == 0 && blockIdx.x == 0) {
-    float max_val = -INFINITY;
-    int max_idx = 0;
-    
-    for (size_t i = 0; i < V; i++) {
-      if (in[i] > max_val) {
-        max_val = in[i];
-        max_idx = i;
-      }
+__global__ void top1_sampling_kernel(float *in, int *out, int V, int ldin) {
+  const int i = blockIdx.x * blockDim.y + threadIdx.y;
+  in += i * ldin; out += i;
+
+  float max = -INFINITY;
+  int tmp = 0;
+  for (int j = threadIdx.x; j < V; j += warp_size) {
+    float val = in[j];
+    if (val > max) {
+      max = val;
+      tmp = j;
     }
-    
-    *out = max_idx;
   }
-}
 
-int top1_sampling(Tensor *in) {
-  size_t s = in->shape[0];
-  size_t V = in->shape[1];
-
-  float *d_in;
-  int *d_out;
-  int out;
-
-  cudaMalloc(&d_in, s * V * sizeof(float));
-  cudaMalloc(&d_out, sizeof(int));
-
-  cudaMemcpy(d_in, in->buf, s * V * sizeof(float), cudaMemcpyHostToDevice);
-
-  top1_sampling_kernel<<<1, 1>>>(d_in + (s - 1) * V, d_out, V);
-
-  cudaMemcpy(&out, d_out, sizeof(int), cudaMemcpyDeviceToHost);
-
-  cudaFree(d_in);
-  cudaFree(d_out);
-
-  return out;
-}
-
-void top1_sampling(float *d_in, int *d_out, size_t s, size_t V) {
-  top1_sampling_kernel<<<1, 1>>>(d_in + (s - 1) * V, d_out, V);
-}
-
-__global__ void batch_top1_sampling_kernel(float *in, int *out, size_t batch_size, size_t n_token, size_t position, size_t s, size_t V) {
-    size_t batch_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (batch_id < batch_size) {
-        float max_val = -INFINITY;
-        int max_idx = 0;
-
-        for (size_t i = 0; i < V; i++) {
-            if (in[batch_id * s * V + (s - 1) * V + i] > max_val) {
-                max_val = in[batch_id * s * V + (s - 1) * V + i];
-                max_idx = i;
-            }
-        }
-        
-        // out[batch_id + position] = max_idx;
-        out[batch_id * n_token + position] = max_idx;
-        // where position is nth token 
+  #pragma unroll
+  for (int offset = warp_size / 2; offset > 0; offset /= 2) {
+    float mv_max = __shfl_down_sync(0xffffffff, max, offset);
+    int mv_tmp = __shfl_down_sync(0xffffffff, tmp, offset);
+    if (mv_max > max) {
+      max = mv_max;
+      tmp = mv_tmp;
     }
-}
+  }
 
-void batch_top1_sampling(float *d_in, int *d_out, size_t batch_size, size_t n_token, size_t position, size_t s, size_t V) {
-    dim3 blockDim(256);
-    dim3 gridDim((batch_size + blockDim.x - 1) / blockDim.x);
-    batch_top1_sampling_kernel<<<gridDim, blockDim>>>(d_in, d_out, batch_size, n_token, position, s, V);
+  if (threadIdx.x == 0) *out = tmp;
+}
+void top1_sampling(float *in, int *out, int N, int V, int ldin) {
+  constexpr int BN = 4;
+  if (N % 4) {
+    fprintf(stderr, "Error: N must be a multiple of %d\n", 4);
+    exit(1);
+  }
+  top1_sampling_kernel<<<N / BN, dim3(warp_size, BN)>>>(in, out, V, ldin);
 }

@@ -19,3 +19,14 @@ struct Tensor {
 
 typedef Tensor Parameter;
 typedef Tensor Activation;
+
+struct Cache {
+  Activation *kv = nullptr;
+  size_t len = 0;
+
+  Cache();
+  ~Cache();
+
+  void clear();
+  void append(Activation *x, Parameter *attn_b, Parameter *attn_w);
+};

@@ -1,61 +1,17 @@
 #include <mpi.h>
+
 #include <cmath>
 #include <cstdio>
-#include <vector>
-#include <iostream>
+#include <chrono>
 
 #include "layer.h"
 #include "model.h"
 
-#define BATCH_SIZE 2048
-#define NGPU 4 
+#define BATCH_SIZE 512
+#define ALLOC_VOCAB ((NUM_VOCAB + 127) / 128) * 128
 
-#define CHECK_CUDA(call)                                              \
-  do {                                                                \
-    cudaError_t status_ = call;                                       \
-    if (status_ != cudaSuccess) {                                     \
-      fprintf(stderr, "CUDA error (%s:%d): %s\n", __FILE__, __LINE__, \
-              cudaGetErrorString(status_));                           \
-      exit(EXIT_FAILURE);                                             \
-    }                                                                 \
-  } while (0)
+int local_rank;
 
-#define MIN(a, b) (((a) < (b)) ? (a) : (b))
-
-void print_device_pointer(float* d_ptr, size_t N, int gpu_id) {
-  float* h_ptr = (float*)malloc(N * sizeof(float));
-  cudaSetDevice(gpu_id);
-  cudaMemcpy(h_ptr, d_ptr, N * sizeof(float), cudaMemcpyDeviceToHost);
-  for (size_t i = 0; i < N; i += 8) {
-    for (size_t j = 0; j < 8; j++) {
-      if ((i+j) < N)
-        printf("%lf ", h_ptr[i+j]);
-      if ((i+j+1) % 768 == 0)
-        printf("\n"); 
-    }
-    printf("\n");
-  }
-  printf("\n");
-  free(h_ptr);
-}
-
-void print_device_pointer(int* d_ptr, size_t N, int gpu_id, char* flag) {
-  int* h_ptr = (int*)malloc(N * sizeof(int));
-  cudaSetDevice(gpu_id);
-  cudaMemcpy(h_ptr, d_ptr, N * sizeof(int), cudaMemcpyDeviceToHost);
-  printf("Printing %s: \n", flag);
-  for (size_t i = 0; i < N; i += 8) {
-    for (size_t j = 0; j < 8; j++) {
-      if ((i+j) < N)
-        printf("%d ", h_ptr[i+j]);
-    }
-    printf("\n");
-  }
-  printf("\n");
-  free(h_ptr);
-}
-
-// Parameters declaration
 Parameter *attn_b[NUM_LAYER], *attn_w[NUM_LAYER];
 Parameter *proj_b[NUM_LAYER], *proj_w[NUM_LAYER];
 Parameter *ln_1_b[NUM_LAYER], *ln_1_g[NUM_LAYER];
@@ -65,69 +21,23 @@ Parameter *mlp2_b[NUM_LAYER], *mlp2_w[NUM_LAYER];
 Parameter *ln_f_b, *ln_f_g;
 Parameter *wpe, *wte;
 
-float *d_attn_b[NUM_LAYER][NGPU], *d_attn_w[NUM_LAYER][NGPU];
-float *d_proj_b[NUM_LAYER][NGPU], *d_proj_w[NUM_LAYER][NGPU];
-float *d_ln_1_b[NUM_LAYER][NGPU], *d_ln_1_g[NUM_LAYER][NGPU];
-float *d_ln_2_b[NUM_LAYER][NGPU], *d_ln_2_g[NUM_LAYER][NGPU];
-float *d_mlp1_b[NUM_LAYER][NGPU], *d_mlp1_w[NUM_LAYER][NGPU];
-float *d_mlp2_b[NUM_LAYER][NGPU], *d_mlp2_w[NUM_LAYER][NGPU];
-float *d_ln_f_b[NGPU], *d_ln_f_g[NGPU];
-float *d_wpe[NGPU], *d_wte[NGPU];
-
-void alloc_and_set_device_parameters() {
-  int order[] = {
-      0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9,
-  };
-
-  for (int gpu_id = 0; gpu_id < NGPU; gpu_id++) {
-    cudaSetDevice(gpu_id);
-
-    for (int i = 0; i < NUM_LAYER; i++) {
-      cudaMalloc(&d_attn_b[order[i]][gpu_id], attn_b[order[i]]->num_elem() * sizeof(float));
-      cudaMalloc(&d_attn_w[order[i]][gpu_id], attn_w[order[i]]->num_elem() * sizeof(float));
-      cudaMalloc(&d_proj_b[order[i]][gpu_id], proj_b[order[i]]->num_elem() * sizeof(float));
-      cudaMalloc(&d_proj_w[order[i]][gpu_id], proj_w[order[i]]->num_elem() * sizeof(float));
-      cudaMalloc(&d_ln_1_b[order[i]][gpu_id], ln_1_b[order[i]]->num_elem() * sizeof(float));
-      cudaMalloc(&d_ln_1_g[order[i]][gpu_id], ln_1_g[order[i]]->num_elem() * sizeof(float));
-      cudaMalloc(&d_ln_2_b[order[i]][gpu_id], ln_2_b[order[i]]->num_elem() * sizeof(float));
-      cudaMalloc(&d_ln_2_g[order[i]][gpu_id], ln_2_g[order[i]]->num_elem() * sizeof(float));
-      cudaMalloc(&d_mlp1_b[order[i]][gpu_id], mlp1_b[order[i]]->num_elem() * sizeof(float));
-      cudaMalloc(&d_mlp1_w[order[i]][gpu_id], mlp1_w[order[i]]->num_elem() * sizeof(float));
-      cudaMalloc(&d_mlp2_b[order[i]][gpu_id], mlp2_b[order[i]]->num_elem() * sizeof(float));
-      cudaMalloc(&d_mlp2_w[order[i]][gpu_id], mlp2_w[order[i]]->num_elem() * sizeof(float));
-    }
-    cudaMalloc(&d_ln_f_b[gpu_id], ln_f_b->num_elem() * sizeof(float));
-    cudaMalloc(&d_ln_f_g[gpu_id], ln_f_g->num_elem() * sizeof(float));
-    cudaMalloc(&d_wpe[gpu_id], wpe->num_elem() * sizeof(float));
-    cudaMalloc(&d_wte[gpu_id], wte->num_elem() * sizeof(float));
-    
-    // Copy data to device
-    for (int i = 0; i < NUM_LAYER; i++) {
-      cudaMemcpy(d_attn_b[order[i]][gpu_id], attn_b[order[i]]->buf, attn_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-      cudaMemcpy(d_attn_w[order[i]][gpu_id], attn_w[order[i]]->buf, attn_w[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-      cudaMemcpy(d_proj_b[order[i]][gpu_id], proj_b[order[i]]->buf, proj_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-      cudaMemcpy(d_proj_w[order[i]][gpu_id], proj_w[order[i]]->buf, proj_w[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-      cudaMemcpy(d_ln_1_b[order[i]][gpu_id], ln_1_b[order[i]]->buf, ln_1_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-      cudaMemcpy(d_ln_1_g[order[i]][gpu_id], ln_1_g[order[i]]->buf, ln_1_g[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-      cudaMemcpy(d_ln_2_b[order[i]][gpu_id], ln_2_b[order[i]]->buf, ln_2_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-      cudaMemcpy(d_ln_2_g[order[i]][gpu_id], ln_2_g[order[i]]->buf, ln_2_g[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-      cudaMemcpy(d_mlp1_b[order[i]][gpu_id], mlp1_b[order[i]]->buf, mlp1_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-      cudaMemcpy(d_mlp1_w[order[i]][gpu_id], mlp1_w[order[i]]->buf, mlp1_w[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-      cudaMemcpy(d_mlp2_b[order[i]][gpu_id], mlp2_b[order[i]]->buf, mlp2_b[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-      cudaMemcpy(d_mlp2_w[order[i]][gpu_id], mlp2_w[order[i]]->buf, mlp2_w[order[i]]->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-    }
-    cudaMemcpy(d_ln_f_b[gpu_id], ln_f_b->buf, ln_f_b->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_ln_f_g[gpu_id], ln_f_g->buf, ln_f_g->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_wpe[gpu_id], wpe->buf, wpe->num_elem() * sizeof(float), cudaMemcpyHostToDevice); 
-    cudaMemcpy(d_wte[gpu_id], wte->buf, wte->num_elem() * sizeof(float), cudaMemcpyHostToDevice);
-  }
-}
+void alloc_activations();
+void free_activations();
 
 void alloc_and_set_parameters(float *param) {
+  char *local_rank_str = getenv("OMPI_COMM_WORLD_LOCAL_RANK");
+  if (local_rank_str == nullptr) {
+    fprintf(stderr, "Error: OMPI_COMM_WORLD_LOCAL_RANK is not set\n");
+    exit(1);
+  }
+  local_rank = atoi(local_rank_str);
+
+  cudaSetDevice(local_rank);
+  cudaDeviceSynchronize();
+
   size_t pos = 0;
-  int order[] = {
-      0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9,
-  };
+  int order[] = { 0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9 };
+
   for (int i = 0; i < NUM_LAYER; i++) {
     attn_b[order[i]] = new Parameter({3 * HIDDEN_DIM}, param + pos);
     pos += OFFSET1;
@@ -160,264 +70,291 @@ void alloc_and_set_parameters(float *param) {
   pos += OFFSET3;
   wpe = new Parameter({MAX_SEQ_LEN, HIDDEN_DIM}, param + pos);
   pos += OFFSET7;
-  wte = new Parameter({NUM_VOCAB, HIDDEN_DIM}, param + pos);
+  wte = new Parameter({(HIDDEN_DIM + 1), ALLOC_VOCAB});
+  float *tmp = (float *)calloc((HIDDEN_DIM + 1) * ALLOC_VOCAB, sizeof(float));
+  for (int i = 0; i < NUM_VOCAB; i++)
+    for (int j = 0; j < HIDDEN_DIM; j++)
+      tmp[j * ALLOC_VOCAB + i] = param[pos + i * HIDDEN_DIM + j];
+  cudaMemcpy(wte->buf, tmp, (HIDDEN_DIM + 1) * ALLOC_VOCAB * sizeof(float), cudaMemcpyHostToDevice);
   pos += OFFSET8;
+  free(tmp);
 
-  alloc_and_set_device_parameters();
+  alloc_activations();
 }
 
 void free_parameters() {
-  for (int gpu_id = 0; gpu_id < NGPU; gpu_id++) {
-    cudaSetDevice(gpu_id);
+  free_activations();
 
-    for (int i = 0; i < NUM_LAYER; i++) {
-      cudaFree(d_attn_b[i][gpu_id]);
-      cudaFree(d_attn_w[i][gpu_id]);
-      cudaFree(d_proj_b[i][gpu_id]);
-      cudaFree(d_proj_w[i][gpu_id]);
-      cudaFree(d_ln_1_b[i][gpu_id]);
-      cudaFree(d_ln_1_g[i][gpu_id]);
-      cudaFree(d_ln_2_b[i][gpu_id]);
-      cudaFree(d_ln_2_g[i][gpu_id]);
-      cudaFree(d_mlp1_b[i][gpu_id]);
-      cudaFree(d_mlp1_w[i][gpu_id]);
-      cudaFree(d_mlp2_b[i][gpu_id]);
-      cudaFree(d_mlp2_w[i][gpu_id]);
+  for (int i = 0; i < NUM_LAYER; i++) {
+    delete attn_b[i];
+    delete attn_w[i];
+    delete proj_b[i];
+    delete proj_w[i];
+    delete ln_1_b[i];
+    delete ln_1_g[i];
+    delete ln_2_b[i];
+    delete ln_2_g[i];
+    delete mlp1_b[i];
+    delete mlp1_w[i];
+    delete mlp2_b[i];
+    delete mlp2_w[i];
+  }
+  delete ln_f_b;
+  delete ln_f_g;
+  delete wpe;
+  delete wte;
+}
+
+Activation *embd_a, *ffn_proj_a, *matmul_reduce;
+Activation *mha_q_proj_a, *mha_out_a, *mha_attn_out_a;
+Activation *residual_a, *logit_a, *out_a;
+
+Cache::Cache() {
+  kv = new Activation({BATCH_SIZE, LEN_INPUT + LEN_OUTPUT, 2 * HIDDEN_DIM});
+}
+
+Cache::~Cache() {
+  delete kv;
+}
+
+void Cache::clear() {
+  len = 0;
+}
+
+void Cache::append(Activation *x, Parameter *attn_b, Parameter *attn_w) {
+  linear(x->buf, attn_w->buf + HIDDEN_DIM, attn_b->buf + HIDDEN_DIM, kv->buf + len * 2 * HIDDEN_DIM,
+    BATCH_SIZE, 2 * HIDDEN_DIM, HIDDEN_DIM, x->shape[1] * HIDDEN_DIM, 3 * HIDDEN_DIM, kv->shape[1] * 2 * HIDDEN_DIM,
+    x->shape[1], HIDDEN_DIM, 2 * HIDDEN_DIM, matmul_reduce->buf, false);
+  len += x->shape[1];
+}
+
+Cache *kv_cache[NUM_LAYER];
+
+void alloc_activations() {
+  embd_a = new Activation({BATCH_SIZE, LEN_INPUT, HIDDEN_DIM});
+  ffn_proj_a = new Activation({BATCH_SIZE, LEN_INPUT, 4 * HIDDEN_DIM});
+  matmul_reduce = new Activation({6, 512 * 768 * 2});
+
+  mha_q_proj_a = new Activation({BATCH_SIZE, LEN_INPUT, HIDDEN_DIM});
+  mha_out_a = new Activation({BATCH_SIZE, LEN_INPUT, HIDDEN_DIM});
+  mha_attn_out_a = new Activation({BATCH_SIZE, LEN_INPUT, HIDDEN_DIM});
+
+  residual_a = new Activation({BATCH_SIZE, LEN_INPUT, HIDDEN_DIM});
+  logit_a = new Activation({BATCH_SIZE, ALLOC_VOCAB});
+  out_a = new Activation({BATCH_SIZE, LEN_INPUT});
+
+  for (int i = 0; i < NUM_LAYER; i++) kv_cache[i] = new Cache();
+}
+
+void free_activations() {
+  delete embd_a;
+  delete ffn_proj_a;
+  delete matmul_reduce;
+  delete mha_q_proj_a;
+  delete mha_out_a;
+  delete mha_attn_out_a;
+  delete residual_a;
+  delete logit_a;
+  delete out_a;
+
+  for (int i = 0; i < NUM_LAYER; i++) delete kv_cache[i];
+}
+
+void set_length(size_t seq_len) {
+  if (seq_len != LEN_INPUT && seq_len != 1) {
+    fprintf(stderr, "Error: seq_len must be %d or %d\n", LEN_INPUT, 1);
+    exit(1);
+  }
+
+  embd_a->shape[1] = seq_len;
+  ffn_proj_a->shape[1] = seq_len;
+  mha_q_proj_a->shape[1] = seq_len;
+  mha_out_a->shape[1] = seq_len;
+  mha_attn_out_a->shape[1] = seq_len;
+  residual_a->shape[1] = seq_len;
+  out_a->shape[1] = seq_len;
+}
+
+/* (Position-wise) Feed-Forward Network
+ * @param [in1]     in: [seq_len, HIDDEN_DIM]
+ * @param [in2] mlp1_w: [HIDDEN_DIM, 4*HIDDEN_DIM]
+ * @param [in3] mlp1_b: [4*HIDDEN_DIM]
+ * @param [in4] mlp2_w: [4*HIDDEN_DIM, HIDDEN_DIM]
+ * @param [in5] mlp2_b: [HIDDEN_DIM]
+ * @param [out]    out: [seq_len, HIDDEN_DIM]
+ */
+void ffn(Activation *in, Parameter *mlp1_w, Parameter *mlp1_b,
+         Parameter *mlp2_w, Parameter *mlp2_b, Activation *out) {
+  /* Projection Up + GELU:
+    [seq_len, HIDDEN_DIM] -> [seq_len, 4*HIDDEN_DIM] */
+  linear(in->buf, mlp1_w->buf, mlp1_b->buf, ffn_proj_a->buf,
+    in->shape[0] * in->shape[1], 4 * HIDDEN_DIM,
+    HIDDEN_DIM, HIDDEN_DIM, 4 * HIDDEN_DIM, 4 * HIDDEN_DIM, matmul_reduce->buf, true);
+
+  /* Projection Down:
+    [seq_len, 4*HIDDEN_DIM] -> [seq_len, HIDDEN_DIM] */
+  linear(ffn_proj_a->buf, mlp2_w->buf, mlp2_b->buf, out->buf,
+    ffn_proj_a->shape[0] * ffn_proj_a->shape[1], HIDDEN_DIM, 4 * HIDDEN_DIM,
+    4 * HIDDEN_DIM, HIDDEN_DIM, HIDDEN_DIM, matmul_reduce->buf, false);
+}
+
+/* (Masked) Multi-Head Self Attention
+ * @param [in1]     in: [seq_len, HIDDEN_DIM]
+ * @param [in2] attn_b: [3*HIDDEN_DIM]
+ * @param [in3] attn_w: [HIDDEN_DIM, 3*HIDDEN_DIM]
+ * @param [in4] proj_b: [HIDDEN_DIM]
+ * @param [in5] proj_w: [HIDDEN_DIM, HIDDEN_DIM]
+ * @param [out]    out: [seq_len, HIDDEN_DIM]
+ */
+void mha(Activation *in, Cache *kv, Parameter *attn_b, Parameter *attn_w,
+         Parameter *proj_b, Parameter *proj_w, Activation *out) {
+  /* Q projection */
+  linear(in->buf, attn_w->buf, attn_b->buf, mha_q_proj_a->buf,
+    in->shape[0] * in->shape[1], HIDDEN_DIM, HIDDEN_DIM,
+    HIDDEN_DIM, 3 * HIDDEN_DIM, HIDDEN_DIM, matmul_reduce->buf, false);
+
+  /* KV projection and update cache */
+  kv->append(in, attn_b, attn_w);
+
+  /* Perform Attention over each head */
+  attention(mha_q_proj_a->buf, kv->kv->buf, mha_attn_out_a->buf,
+            HIDDEN_DIM, NUM_HEAD, BATCH_SIZE, mha_q_proj_a->shape[1], kv->len);
+
+  /* OUT projection:
+    [seq_len, HIDDEN_DIM] -> [seq_len, HIDDEN_DIM] */
+  linear(mha_attn_out_a->buf, proj_w->buf, proj_b->buf, out->buf,
+    mha_attn_out_a->shape[0] * mha_attn_out_a->shape[1], HIDDEN_DIM, HIDDEN_DIM,
+    HIDDEN_DIM, HIDDEN_DIM, HIDDEN_DIM, matmul_reduce->buf, false);
+}
+
+/* Transformer Block
+ * @param [in1]      in: [seq_len, HIDDEN_DIM]
+ * @param [in2]  attn_b: [3*HIDDEN_DIM]
+ * @param [in3]  attn_w: [HIDDEN_DIM, 3*HIDDEN_DIM]
+ * @param [in4]  proj_b: [HIDDEN_DIM]
+ * @param [in5]  proj_w: [HIDDEN_DIM, HIDDEN_DIM]
+ * @param [in6]  ln_1_b: [HIDDEN_DIM]
+ * @param [in7]  ln_1_g: [HIDDEN_DIM]
+ * @param [in8]  ln_2_b: [HIDDEN_DIM]
+ * @param [in9]  ln_2_g: [HIDDEN_DIM]
+ * @param [in10] mlp1_b: [4*HIDDEN_DIM]
+ * @param [in11] mlp1_w: [HIDDEN_DIM, 4*HIDDEN_DIM]
+ * @param [in12] mlp2_b: [HIDDEN_DIM]
+ * @param [in13] mlp2_w: [4*HIDDEN_DIM, HIDDEN_DIM]
+ * @param [out]     out: [seq_len, HIDDEN_DIM]
+ */
+void transformer_block(Activation *in, Cache *kv, Parameter *attn_b, Parameter *attn_w,
+                       Parameter *proj_b, Parameter *proj_w, Parameter *ln_1_b,
+                       Parameter *ln_1_g, Parameter *ln_2_b, Parameter *ln_2_g,
+                       Parameter *mlp1_b, Parameter *mlp1_w, Parameter *mlp2_b,
+                       Parameter *mlp2_w, Activation *out) {
+  /* Layer Normalization */
+  layer_norm(in->buf, ln_1_g->buf, ln_1_b->buf, residual_a->buf, in->shape[0] * in->shape[1], HIDDEN_DIM);
+
+  /* Masked Multi-Head Self-Attention */
+  mha(residual_a, kv, attn_b, attn_w, proj_b, proj_w, mha_out_a);
+
+  /* Add Residual */
+  add(mha_out_a->buf, in->buf, mha_out_a->num_elem());
+
+  /* Layer Normalization */
+  layer_norm(mha_out_a->buf, ln_2_g->buf, ln_2_b->buf, residual_a->buf, mha_out_a->shape[0] * mha_out_a->shape[1], HIDDEN_DIM);
+
+  /* Position-wise Feed-Forward Network */
+  ffn(residual_a, mlp1_w, mlp1_b, mlp2_w, mlp2_b, out);
+
+  /* Add Residual */
+  add(out->buf, mha_out_a->buf, mha_out_a->num_elem());
+}
+
+void run_model(int *input, int *output, size_t n_prompt, size_t n_token) {
+  if (n_prompt % BATCH_SIZE != 0) {
+    fprintf(stderr, "Error: n_prompt must be a multiple of %d\n", BATCH_SIZE);
+    exit(1);
+  }
+
+  /* Outer loop: generate tokens for each prompt */
+  for (size_t p = 0; p < n_prompt; p += BATCH_SIZE) {
+    /* Initialize input prompt */
+    set_length(LEN_INPUT);
+    cudaMemcpy(out_a->buf, input + p * LEN_INPUT, LEN_INPUT * BATCH_SIZE * sizeof(int), cudaMemcpyHostToDevice);
+
+    /* Inner loop: generate next token */
+    for (size_t t = 0; t < n_token; t++) {
+      /* Token + Positional Embedding */
+      int pos = t == 0 ? 0 : LEN_INPUT + t - 1;
+      token_pos_embedding((int *)out_a->buf, wte->buf, wpe->buf, embd_a->buf, BATCH_SIZE, out_a->shape[1], HIDDEN_DIM, pos, ALLOC_VOCAB);
+
+      /* Forward path of Transformer blocks */
+      for (size_t l = 0; l < NUM_LAYER; l++)
+        transformer_block(embd_a, kv_cache[l], attn_b[l], attn_w[l], proj_b[l], proj_w[l],
+                          ln_1_b[l], ln_1_g[l], ln_2_b[l], ln_2_g[l],
+                          mlp1_b[l], mlp1_w[l], mlp2_b[l], mlp2_w[l],
+                          embd_a);
+
+      /* Final Layer Normalization */
+      layer_norm(embd_a->buf, ln_f_g->buf, ln_f_b->buf, embd_a->buf, embd_a->shape[0] * embd_a->shape[1], HIDDEN_DIM);
+
+      /* Projection to vocab. dimension */
+      lm_head(embd_a->buf, wte->buf, logit_a->buf, BATCH_SIZE, embd_a->shape[1], ALLOC_VOCAB, HIDDEN_DIM);
+
+      /* Greedy sampling */
+      top1_sampling(logit_a->buf, (int *)out_a->buf, BATCH_SIZE, NUM_VOCAB, ALLOC_VOCAB);
+
+      int input_prompt[BATCH_SIZE];
+      cudaMemcpy(input_prompt, out_a->buf, BATCH_SIZE * sizeof(int), cudaMemcpyDeviceToHost);
+      for (size_t i = 0; i < BATCH_SIZE; i++)
+        output[(p + i) * n_token + t] = input_prompt[i];
+
+      set_length(1);
     }
-    cudaFree(d_ln_f_b[gpu_id]);
-    cudaFree(d_ln_f_g[gpu_id]);
-    cudaFree(d_wpe[gpu_id]);
-    cudaFree(d_wte[gpu_id]);
+    
+    for (int l = 0; l < NUM_LAYER; l++)
+      kv_cache[l]->clear();
   }
 }
 
-float *d_embd_a[NGPU], *d_ffn_proj_a[NGPU];
-float *d_mha_qkv_proj_a[NGPU], *d_mha_out_a[NGPU], *d_mha_split_qkv_a[NGPU],
-    *d_mha_split_head_a[NGPU], *d_mha_mask_a[NGPU], *d_mha_merge_head_a[NGPU], *d_mha_q_a[NGPU],
-    *d_mha_k_a[NGPU], *d_mha_v_a[NGPU], *d_mha_attn_out_a[NGPU], *d_mha_concat_head_a[NGPU];
-float *d_attn_score_a[NGPU], *d_k_transposed_a[NGPU];
-float *d_wte_transposed_a[NGPU], *d_residual_a[NGPU], *d_logit_a[NGPU];
-float *d_transformer_block_a[NGPU];
-
-void alloc_activations(size_t prompt_size, int gpu_id) {
-  cudaSetDevice(gpu_id);
-
-  cudaMalloc(&d_embd_a[gpu_id], prompt_size * HIDDEN_DIM * sizeof(float));
-  cudaMalloc(&d_ffn_proj_a[gpu_id], prompt_size * 4 * HIDDEN_DIM * sizeof(float));
-  cudaMalloc(&d_mha_qkv_proj_a[gpu_id], prompt_size * 3 * HIDDEN_DIM * sizeof(float));
-  cudaMalloc(&d_mha_out_a[gpu_id], prompt_size * HIDDEN_DIM * sizeof(float));
-  cudaMalloc(&d_mha_split_qkv_a[gpu_id], 3 * prompt_size * HIDDEN_DIM * sizeof(float));
-  cudaMalloc(&d_mha_split_head_a[gpu_id], 3 * NUM_HEAD * prompt_size * HIDDEN_DIM / NUM_HEAD * sizeof(float));
-  cudaMalloc(&d_mha_mask_a[gpu_id], prompt_size * prompt_size * sizeof(float));
-  cudaMalloc(&d_mha_merge_head_a[gpu_id], NUM_HEAD * prompt_size * HIDDEN_DIM / NUM_HEAD * sizeof(float));
-  cudaMalloc(&d_mha_q_a[gpu_id], NUM_HEAD * prompt_size * HIDDEN_DIM / NUM_HEAD * sizeof(float));
-  cudaMalloc(&d_mha_k_a[gpu_id], NUM_HEAD * prompt_size * HIDDEN_DIM / NUM_HEAD * sizeof(float));
-  cudaMalloc(&d_mha_v_a[gpu_id], NUM_HEAD * prompt_size * HIDDEN_DIM / NUM_HEAD * sizeof(float));
-  cudaMalloc(&d_mha_attn_out_a[gpu_id], NUM_HEAD * prompt_size * HIDDEN_DIM / NUM_HEAD * sizeof(float));
-  cudaMalloc(&d_mha_concat_head_a[gpu_id], prompt_size * HIDDEN_DIM * sizeof(float));
-  cudaMalloc(&d_attn_score_a[gpu_id], NUM_HEAD * prompt_size * prompt_size * sizeof(float));
-  cudaMalloc(&d_k_transposed_a[gpu_id], NUM_HEAD * HIDDEN_DIM / NUM_HEAD * prompt_size * sizeof(float));
-  cudaMalloc(&d_wte_transposed_a[gpu_id], HIDDEN_DIM * NUM_VOCAB * sizeof(float));
-  cudaMalloc(&d_residual_a[gpu_id], prompt_size * HIDDEN_DIM * sizeof(float));
-  cudaMalloc(&d_logit_a[gpu_id], prompt_size * NUM_VOCAB * sizeof(float));
-  cudaMalloc(&d_transformer_block_a[gpu_id], prompt_size * HIDDEN_DIM * sizeof(float));
-}
-
-void free_activations(int gpu_id) {
-  cudaSetDevice(gpu_id);
-
-  cudaFree(d_embd_a[gpu_id]);
-  cudaFree(d_ffn_proj_a[gpu_id]);
-  cudaFree(d_mha_qkv_proj_a[gpu_id]);
-  cudaFree(d_mha_out_a[gpu_id]);
-  cudaFree(d_mha_split_qkv_a[gpu_id]);
-  cudaFree(d_mha_split_head_a[gpu_id]);
-  cudaFree(d_mha_mask_a[gpu_id]);
-  cudaFree(d_mha_merge_head_a[gpu_id]);
-  cudaFree(d_mha_q_a[gpu_id]);
-  cudaFree(d_mha_k_a[gpu_id]);
-  cudaFree(d_mha_v_a[gpu_id]);
-  cudaFree(d_mha_attn_out_a[gpu_id]);
-  cudaFree(d_mha_concat_head_a[gpu_id]);
-  cudaFree(d_attn_score_a[gpu_id]);
-  cudaFree(d_k_transposed_a[gpu_id]);
-  cudaFree(d_wte_transposed_a[gpu_id]);
-  cudaFree(d_residual_a[gpu_id]);
-  cudaFree(d_logit_a[gpu_id]);
-  cudaFree(d_transformer_block_a[gpu_id]);
-}
-
-void ffn(float *d_in, float *d_mlp1_w, float *d_mlp1_b,
-         float *d_mlp2_w, float *d_mlp2_b, float *d_out, size_t seq_len, size_t batch_size, int gpu_id) {
-    cudaSetDevice(gpu_id);
-
-    batch_linear(d_in, d_mlp1_w, d_mlp1_b, d_ffn_proj_a[gpu_id], batch_size, seq_len, HIDDEN_DIM, 4 * HIDDEN_DIM);
-    batch_gelu(d_ffn_proj_a[gpu_id], batch_size, seq_len * 4 * HIDDEN_DIM);
-    batch_linear(d_ffn_proj_a[gpu_id], d_mlp2_w, d_mlp2_b, d_out, batch_size, seq_len, 4 * HIDDEN_DIM, HIDDEN_DIM);
-}
-
-void attention(float *d_q, float *d_k, float *d_v, float *d_mask, float *d_out, size_t seq_len, size_t head_dim, size_t batch_size, int gpu_id) {
-    cudaSetDevice(gpu_id);
-
-    batch_transpose(d_k, d_k_transposed_a[gpu_id], batch_size, seq_len, head_dim);
-    batch_matmul(d_q, d_k_transposed_a[gpu_id], d_attn_score_a[gpu_id], batch_size, seq_len, head_dim, seq_len);
-    batch_scaling(d_attn_score_a[gpu_id], 1.0 / sqrt(head_dim), batch_size, seq_len * seq_len);
-    batch_add(d_attn_score_a[gpu_id], d_mask, batch_size, seq_len * seq_len);
-    batch_softmax(d_attn_score_a[gpu_id], batch_size, seq_len, seq_len);
-    batch_matmul(d_attn_score_a[gpu_id], d_v, d_out, batch_size, seq_len, seq_len, head_dim);
-}
-
-void mha(float *d_in, float *d_attn_b, float *d_attn_w,
-         float *d_proj_b, float *d_proj_w, float *d_out, size_t seq_len, size_t batch_size, int gpu_id) {
-    cudaSetDevice(gpu_id);
-
-    batch_linear(d_in, d_attn_w, d_attn_b, d_mha_qkv_proj_a[gpu_id], batch_size, seq_len, HIDDEN_DIM, 3 * HIDDEN_DIM);
-    batch_split_qkv(d_mha_qkv_proj_a[gpu_id], d_mha_split_qkv_a[gpu_id], batch_size, seq_len, 3 * HIDDEN_DIM);
-    batch_split_head(d_mha_split_qkv_a[gpu_id], d_mha_split_head_a[gpu_id], batch_size, NUM_HEAD, seq_len, HIDDEN_DIM);
-    batch_generate_mask(d_mha_mask_a[gpu_id], batch_size * NUM_HEAD, seq_len);
-
-    batch_head_extract_qkv(d_mha_split_head_a[gpu_id], d_mha_q_a[gpu_id], d_mha_k_a[gpu_id], d_mha_v_a[gpu_id], batch_size, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
-    attention(d_mha_q_a[gpu_id], d_mha_k_a[gpu_id], d_mha_v_a[gpu_id], d_mha_mask_a[gpu_id], d_mha_attn_out_a[gpu_id], seq_len, HIDDEN_DIM / NUM_HEAD, batch_size * NUM_HEAD, gpu_id);
-
-    batch_concat_head(d_mha_attn_out_a[gpu_id], d_mha_concat_head_a[gpu_id], batch_size, NUM_HEAD, seq_len, HIDDEN_DIM / NUM_HEAD);
-    batch_linear(d_mha_concat_head_a[gpu_id], d_proj_w, d_proj_b, d_out, batch_size, seq_len, HIDDEN_DIM, HIDDEN_DIM);
-}
-
-void transformer_block(float *d_in, float *d_attn_b, float *d_attn_w,
-                       float *d_proj_b, float *d_proj_w, float *d_ln_1_b,
-                       float *d_ln_1_g, float *d_ln_2_b, float *d_ln_2_g,
-                       float *d_mlp1_b, float *d_mlp1_w, float *d_mlp2_b,
-                       float *d_mlp2_w, float *d_out, size_t seq_len, size_t batch_size, int gpu_id) { 
-    cudaSetDevice(gpu_id);
-
-    batch_copy(d_in, d_residual_a[gpu_id], batch_size, seq_len * HIDDEN_DIM);
-    batch_layer_norm(d_in, d_ln_1_g, d_ln_1_b, batch_size, seq_len, HIDDEN_DIM, 1e-5);
-    mha(d_in, d_attn_b, d_attn_w, d_proj_b, d_proj_w, d_mha_out_a[gpu_id], seq_len, batch_size, gpu_id);
-    batch_add(d_mha_out_a[gpu_id], d_residual_a[gpu_id], batch_size, seq_len * HIDDEN_DIM);
-    batch_copy(d_mha_out_a[gpu_id], d_residual_a[gpu_id], batch_size, seq_len * HIDDEN_DIM);
-    batch_layer_norm(d_mha_out_a[gpu_id], d_ln_2_g, d_ln_2_b, batch_size, seq_len, HIDDEN_DIM, 1e-5);
-    ffn(d_mha_out_a[gpu_id], d_mlp1_w, d_mlp1_b, d_mlp2_w, d_mlp2_b, d_out, seq_len, batch_size, gpu_id);
-    batch_add(d_out, d_residual_a[gpu_id], batch_size, seq_len * HIDDEN_DIM);
-}
-
-__global__ void insert_tokens_kernel(int *d_out, int *d_input_prompt, int *d_buffer, int prompt_size, int n_token, int batch_size, int position, int total_size) {
-    for (int i = 0; i < batch_size; i++) {
-        for (int j = 0; j < prompt_size; j++) {
-            d_buffer[i * prompt_size + i + j] = d_input_prompt[i * prompt_size + j];
-        }
-    }
-
-    for (int i = 0; i < batch_size; i++) {
-        int insert_position = (i + 1) * prompt_size + i;
-        d_buffer[insert_position] = d_out[i * n_token + position];
-    }
-
-    for (int i = 0; i < total_size; i++) {
-        d_input_prompt[i] = d_buffer[i];
-    }
-}
-
+/* [Model Computation: Token Generation] */
 void generate_tokens(int *input, int *output, size_t n_prompt, size_t n_token) {
-    int mpi_rank, mpi_size;
-    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+  cudaSetDevice(local_rank);
+  cudaDeviceSynchronize();
 
-    if (mpi_rank != 0) {
-        input = (int *)malloc(n_prompt * tokens_per_prompt * sizeof(int));
-        output = (int *)malloc(n_prompt * n_token * sizeof(int));
-    }
+  // get MPI rank and size
+  int mpi_rank, mpi_size;
+  MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
 
-    MPI_Bcast(input, n_prompt * tokens_per_prompt, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(output, n_prompt * n_token, MPI_INT, 0, MPI_COMM_WORLD);
+  if (n_token != LEN_OUTPUT) {
+    fprintf(stderr, "Error: n_token must be %d\n", LEN_OUTPUT);
+    exit(1);
+  }
 
-    size_t prompts_per_node = (n_prompt + mpi_size - 1) / mpi_size;
-    size_t start_prompt = mpi_rank * prompts_per_node;
-    size_t end_prompt = MIN(start_prompt + prompts_per_node, n_prompt);
+  if (tokens_per_prompt != LEN_INPUT) {
+    fprintf(stderr, "Error: tokens_per_prompt must be %d\n", LEN_INPUT);
+    exit(1);
+  }
 
-    for (size_t p = start_prompt; p < end_prompt; p += BATCH_SIZE) {
-        int batch_size = MIN(BATCH_SIZE, end_prompt - p);
-        int prompt_size = tokens_per_prompt;
+  // allocate memory for input and output
+  size_t n_prompt_node = n_prompt / mpi_size;
+  if (mpi_rank != 0) {
+    input = (int *)malloc(n_prompt_node * tokens_per_prompt * sizeof(int));
+    output = (int *)malloc(n_prompt_node * n_token * sizeof(int));
+  }
 
-        std::vector<int> input_prompt(batch_size * prompt_size);
-        memcpy(input_prompt.data(), input + p * prompt_size, batch_size * prompt_size * sizeof(int));
+  // scatter input to all nodes
+  MPI_Scatter(input, n_prompt_node * tokens_per_prompt, MPI_INT, input,
+              n_prompt_node * tokens_per_prompt, MPI_INT, 0, MPI_COMM_WORLD);
 
-        int *d_input_prompt[NGPU];
-        int *d_out[NGPU];
-        int *d_buffer[NGPU]; 
+  // generate tokens from model
+  run_model(input, output, n_prompt_node, n_token);
 
-        for (int gpu_id = 0; gpu_id < NGPU; gpu_id++) {
-            cudaSetDevice(gpu_id);
-            size_t start_idx = gpu_id * (batch_size / NGPU);
-            size_t end_idx = (gpu_id == NGPU - 1) ? batch_size : (gpu_id + 1) * (batch_size / NGPU);
-            size_t gpu_batch_size = end_idx - start_idx;
+  // gather output from all nodes
+  MPI_Gather(output, n_prompt_node * n_token, MPI_INT, output,
+             n_prompt_node * n_token, MPI_INT, 0, MPI_COMM_WORLD);
 
-            CHECK_CUDA(cudaMalloc(&d_input_prompt[gpu_id], batch_size * (prompt_size + n_token - 1) * sizeof(int)));
-            CHECK_CUDA(cudaMalloc(&d_buffer[gpu_id], batch_size * (prompt_size + n_token - 1) * sizeof(int)));
-            CHECK_CUDA(cudaMalloc(&d_out[gpu_id], batch_size * n_token * sizeof(int)));
-            alloc_activations(batch_size * (prompt_size + n_token - 1), gpu_id);
-            CHECK_CUDA(cudaMemcpy(d_input_prompt[gpu_id], input_prompt.data() + start_idx * prompt_size, gpu_batch_size * prompt_size * sizeof(int), cudaMemcpyHostToDevice));
-        }
-
-        for (size_t t = 0; t < n_token; t++) {
-            for (int gpu_id = 0; gpu_id < NGPU; gpu_id++) {
-                cudaSetDevice(gpu_id);
-                size_t start_idx = gpu_id * (batch_size / NGPU);
-                size_t end_idx = (gpu_id == NGPU - 1) ? batch_size : (gpu_id + 1) * (batch_size / NGPU);
-                size_t gpu_batch_size = end_idx - start_idx;
-
-                batch_token_pos_embedding(d_input_prompt[gpu_id], d_wte[gpu_id], d_wpe[gpu_id], d_embd_a[gpu_id], gpu_batch_size, prompt_size, HIDDEN_DIM);
-
-                for (size_t l = 0; l < NUM_LAYER; l++) {
-                    transformer_block(d_embd_a[gpu_id], d_attn_b[l][gpu_id], d_attn_w[l][gpu_id], d_proj_b[l][gpu_id], d_proj_w[l][gpu_id],
-                                      d_ln_1_b[l][gpu_id], d_ln_1_g[l][gpu_id], d_ln_2_b[l][gpu_id], d_ln_2_g[l][gpu_id],
-                                      d_mlp1_b[l][gpu_id], d_mlp1_w[l][gpu_id], d_mlp2_b[l][gpu_id], d_mlp2_w[l][gpu_id],
-                                      d_transformer_block_a[gpu_id], prompt_size, gpu_batch_size, gpu_id);
-                    batch_copy(d_transformer_block_a[gpu_id], d_embd_a[gpu_id], gpu_batch_size, prompt_size * HIDDEN_DIM);
-                }
-
-                batch_layer_norm(d_embd_a[gpu_id], d_ln_f_g[gpu_id], d_ln_f_b[gpu_id], gpu_batch_size, prompt_size, HIDDEN_DIM, 1e-5);
-                transpose(d_wte[gpu_id], d_wte_transposed_a[gpu_id], wte->shape[0], wte->shape[1]);
-                batch_matmul_final(d_embd_a[gpu_id], d_wte_transposed_a[gpu_id], d_logit_a[gpu_id], gpu_batch_size, prompt_size, HIDDEN_DIM, wte->shape[0]);
-                batch_top1_sampling(d_logit_a[gpu_id], d_out[gpu_id], gpu_batch_size, n_token, t, prompt_size, NUM_VOCAB);
-                insert_tokens_kernel<<<1, 1>>>(d_out[gpu_id], d_input_prompt[gpu_id], d_buffer[gpu_id], prompt_size, n_token, gpu_batch_size, t, batch_size * (prompt_size + n_token - 1));
-            }
-
-            prompt_size += 1;
-        }
-
-        for (int gpu_id = 0; gpu_id < NGPU; gpu_id++) {
-            cudaSetDevice(gpu_id); 
-
-            size_t start_idx = gpu_id * (batch_size / NGPU);
-            size_t end_idx = (gpu_id == NGPU - 1) ? batch_size : (gpu_id + 1) * (batch_size / NGPU);
-            size_t gpu_batch_size = end_idx - start_idx;
-            CHECK_CUDA(cudaMemcpy(output + p * n_token + start_idx * n_token, d_out[gpu_id], gpu_batch_size * n_token * sizeof(int), cudaMemcpyDeviceToHost));
-            cudaFree(d_out);
-        }
-    }
-
-    if (mpi_rank == 0) {
-        std::vector<int> final_output(n_prompt * n_token);
-        MPI_Gather(output, prompts_per_node * n_token, MPI_INT, final_output.data(), prompts_per_node * n_token, MPI_INT, 0, MPI_COMM_WORLD);
-        memcpy(output, final_output.data(), n_prompt * n_token * sizeof(int));
-    } else {
-        MPI_Gather(output + start_prompt * n_token, prompts_per_node * n_token, MPI_INT, NULL, 0, MPI_INT, 0, MPI_COMM_WORLD);
-    }
-
-    // Print output
-    if (mpi_rank == 0) {
-        for (size_t i = 0; i < 8; i++) {
-            printf("Prompt %zu: ", i);
-            for (size_t j = 0; j < tokens_per_prompt; j++) {
-                printf("%d ", input[i * tokens_per_prompt + j]);
-            }
-            printf("\n");
-
-            printf("Output %zu: ", i);
-            for (size_t j = 0; j < n_token; j++) {
-                printf("%d ", output[i * n_token + j]);
-            }
-            printf("\n");
-        }
-    }
+  // free memory of input and output
+  if (mpi_rank != 0) {
+    free(input);
+    free(output);
+  }
 }

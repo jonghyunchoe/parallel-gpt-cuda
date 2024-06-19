@@ -1,4 +1,4 @@
-#include "model.h"
+#include "tensor.h"
 
 /* [Tensor Structure] */
 /* Tensor
@@ -12,19 +12,19 @@ Tensor::Tensor(const vector<size_t> &shape_) {
   ndim = shape_.size();
   for (size_t i = 0; i < ndim; i++) { shape[i] = shape_[i]; }
   size_t N_ = num_elem();
-  buf = (float *) calloc(N_, sizeof(float));
+  cudaMalloc(&buf, N_ * sizeof(float));
 }
 
 Tensor::Tensor(const vector<size_t> &shape_, float *buf_) {
   ndim = shape_.size();
   for (size_t i = 0; i < ndim; i++) { shape[i] = shape_[i]; }
   size_t N_ = num_elem();
-  buf = (float *) malloc(N_ * sizeof(float));
-  memcpy(buf, buf_, N_ * sizeof(float));
+  cudaMalloc(&buf, N_ * sizeof(float));
+  cudaMemcpy(buf, buf_, N_ * sizeof(float), cudaMemcpyHostToDevice);
 }
 
 Tensor::~Tensor() {
-  if (buf != nullptr) free(buf);
+  if (buf != nullptr) cudaFree(buf);
 }
 
 size_t Tensor::num_elem() {
